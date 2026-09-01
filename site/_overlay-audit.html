@@ -29,6 +29,7 @@
   import * as surf from './js/widgets/surf.js';
   import * as subway from './js/widgets/subway.js';
   import * as markets from './js/widgets/markets.js';
+  import * as tennis from './js/widgets/tennis.js';
 
   const q = new URLSearchParams(location.search);
   const id = q.get('id') ?? 'weather';
@@ -57,7 +58,7 @@
   }
   if (q.get('meta') === '0') document.body.classList.add('hidemeta');
   const cfg = normalizeConfig(structuredClone(DEFAULT_CONFIG));
-  const MODS = { weather, surf, subway, markets };
+  const MODS = { weather, surf, subway, markets, tennis };
 
   // Worst cases, built the way the widgets' own view models are shaped.
   //
@@ -86,6 +87,22 @@
         lines: SUB_LINES.slice(0, nAlert + nGood).map((line, i) => (i < nAlert
           ? { line, ok: false, headers: TWO ? [LONG, 'Expect longer waits in both directions.'] : [LONG] }
           : { line, ok: true, headers: [] })) };
+    }
+    if (which === 'tennis') {
+      // The tennis board's worst case: nAlert live + nGood finished rows, every
+      // one at the widest realistic widths — the longest tour pairing, a full
+      // five-set score, and the widest round chip (R128).
+      const long = (i, over) => ({
+        tour: 'ATP', round: 'Round of 128',
+        a: 'F. Auger-Aliassime', b: 'B. Haddad Maia',
+        aFlag: 'https://a.espncdn.com/i/teamlogos/countries/500/can.png',
+        bFlag: 'https://a.espncdn.com/i/teamlogos/countries/500/bra.png',
+        t: 1783000000000 + i, ...over,
+      });
+      return { name: 'US Open', rows: [
+        ...Array.from({ length: nAlert }, (_, i) => long(i, { state: 'in', winner: null, sets: '7-6 6-7 7-6 6-7 5-5', detail: '5th Set' })),
+        ...Array.from({ length: nGood }, (_, i) => long(nAlert + i, { state: 'post', winner: 'a', sets: '7-6 6-7 7-6 6-7 7-6', detail: 'Final' })),
+      ] };
     }
     const syms = SYMS.slice(0, nAlert + nGood);
     return { updatedAt: Math.floor(Date.now() / 1000), stale: false,

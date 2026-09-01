@@ -8,6 +8,7 @@ import { setCardNote, setMoreBadge } from '../card.js';
 import { fitList } from '../capacity.js';
 import { WORKER_URL } from '../env.js';
 import { setExpandSource } from '../expand.js';
+import { dealColumns, gridStyle } from '../columns.js';
 import { mapTennisEvent, mapTennis } from '../espn-scores.js';
 
 export { mapTennisEvent, mapTennis }; // single shared mapper (site fallback + worker digest + tests)
@@ -16,9 +17,10 @@ export const meta = { id: 'tennis', title: 'Tennis', refreshMs: 5 * 60 * 1000 };
 
 // ---------- one match, two renderings ----------
 //
-// The card packs a match onto ONE line (matchup left, score right); the board
-// stacks the two. Everything that decides WHAT those two strings say is shared
-// so the surfaces can never disagree about who beat whom.
+// The card and the board both pack a match onto ONE line (matchup left, score
+// right); the board adds a quiet round chip. Everything that decides WHAT
+// those strings say is shared so the surfaces can never disagree about who
+// beat whom.
 
 const flag = (href) => (href ? `<img class="tennis-row__flag" src="${escapeHtml(href)}" alt="">` : '');
 
@@ -50,17 +52,37 @@ const LIVE_DOT = '<b class="tennis-row__live">●</b> ';
 export const boardDay = (date = new Date()) =>
   date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
 
-// The full-screen view: a narrow centered column of stacked match rows. Eight
-// is the canvas — on the pinned line-heights in main.css a two-line row is
-// 65.25px, so eight on a 28px rhythm are 718px inside the 814px body and nine
-// would be 811px with nothing left.
-export const BOARD_MATCHES = 8;
+// The board's round chip: the feed's displayName, compressed to the draw-sheet
+// shorthand ("Round of 16" and "Round 3" are both feed-real; slams use one,
+// regular tour weeks the other). Qualifying rounds collapse to one quiet word
+// and anything unrecognized renders as an empty chip rather than a guess.
+export function roundAbbrev(name = '') {
+  const n = String(name);
+  const of = n.match(/^round of (\d+)$/i) || n.match(/^round (\d+)$/i);
+  if (of) return `R${of[1]}`;
+  if (/^quarterfinals?$/i.test(n)) return 'QF';
+  if (/^semifinals?$/i.test(n)) return 'SF';
+  if (/^finals?$/i.test(n)) return 'F';
+  if (/^qualifying/i.test(n)) return 'Qual';
+  return '';
+}
+
+// The full-screen view (Sean's pick, mockup C, 2026-09-01): the card's own
+// one-line row on hairline rules, dealt into two centered columns past
+// thirteen — the golf leaderboard's deal. Twenty-six is the canvas: on the
+// pinned line-heights in main.css a row is 11 + 27.5 + 11 + 1 = 50.5px, so
+// thirteen per column are 656.5px inside the 814px body.
+export const BOARD_ROWS = 13;
+export const BOARD_MATCHES = BOARD_ROWS * 2;
 
 function tennisBoard(rows) {
-  return `<div class="tennis-board">${rows
-    .slice(0, BOARD_MATCHES)
+  const shown = rows.slice(0, BOARD_MATCHES);
+  const { columns, rows: perColumn } = dealColumns(shown.length, { fitsOneColumn: BOARD_ROWS });
+  const split = columns > 1;
+  return `<div class="tennis-board ${split ? 'tennis-board--split' : ''}"${gridStyle('--board-rows', perColumn)}>${shown
     .map(
       (m) => `<div class="tennis-board__row ${m.state === 'in' ? 'tennis-row--live' : ''}">
+        <span class="tennis-board__round">${escapeHtml(roundAbbrev(m.round))}</span>
         <span class="tennis-board__match">${m.state === 'in' ? LIVE_DOT : ''}${matchLabel(m)}</span>
         <span class="tennis-board__score">${matchScore(m)}</span>
       </div>`,

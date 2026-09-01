@@ -2879,23 +2879,33 @@ body.ss-backdrop .cf-dial__svg, .ss-preview.ss-backdrop .cf-dial__svg {
 .golf-board__row .golf-row__today { min-width: 96px; text-align: right; font-size: 22px; }
 .golf-board__row .golf-row__score { min-width: 72px; font-size: 28px; }
 
-/* The full-screen tennis view (Sean's pick): a narrow centered column of
-   stacked match rows — the matchup on its own line, the score or the start time
-   quiet beneath it, so a mixed board of finals and fixtures reads as one list.
-   Eight is the canvas, on PINNED line-heights (the .expand__head idiom, so the
-   fit is arithmetic rather than a measurement in whatever face this was
-   modelled in): a 32.5 + 4 + 28.75 = 65.25px row on a 28px rhythm puts eight
-   rows at 718px inside the 814px body, and nine at 811px with nothing left. */
+/* The full-screen tennis view (Sean's pick, mockup C, 2026-09-01): the card's
+   own one-line row on hairline rules — round chip, matchup, score — dealt into
+   two centered columns past thirteen matches (the golf leaderboard's deal, so
+   a slam's whole order of play reads DOWN then across; --board-rows is set
+   inline by tennis.js). Twenty-six is the canvas, on PINNED line-heights (the
+   .expand__head idiom, so the fit is arithmetic rather than a measurement in
+   whatever face this was modelled in): a row is 11 + 27.5 + 11 + its 1px rule
+   = 50.5px, and thirteen per column are 656.5px inside the 814px body. */
 .expand__body .tennis-board {
-  height: 100%; display: flex; flex-direction: column;
-  justify-content: center; align-items: center; gap: 28px; overflow: hidden;
+  height: 100%; display: grid;
+  grid-template-columns: 800px;
+  grid-template-rows: repeat(var(--board-rows, 13), min-content);
+  grid-auto-flow: column;
+  align-content: center; justify-content: center; column-gap: 100px; overflow: hidden;
 }
-.tennis-board__row { width: 980px; display: flex; flex-direction: column; gap: 4px; }
-.tennis-board__match { font-size: 26px; line-height: 1.25; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tennis-board__score { font-size: 23px; line-height: 1.25; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.expand__body .tennis-board--split { grid-template-columns: repeat(2, 800px); }
+.tennis-board__row {
+  display: flex; align-items: baseline; gap: 16px; line-height: 1.25;
+  padding: 11px 0; border-bottom: 1px solid var(--bg-card-2);
+}
+.tennis-board__round { flex: none; width: 56px; font-size: 20px; color: var(--ink-faint); }
+.tennis-board__match { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 22px; }
+.tennis-board__match b { font-weight: 600; }
+.tennis-board__score { flex: none; font-size: 20px; color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tennis-board__row.tennis-row--live .tennis-board__score { color: var(--ink); font-weight: 600; }
-.tennis-board .tennis-row__flag { width: 27px; height: 18px; margin-right: 8px; }
-.tennis-board .tennis-row__live { font-size: 16px; }
+.tennis-board .tennis-row__flag { width: 22px; height: 15px; margin-right: 6px; vertical-align: -1px; }
+.tennis-board .tennis-row__live { font-size: 13px; }
 
 /* ---------- headlines ---------- */
 /* Source + age on a small meta line above the full-width headline; the

@@ -28,7 +28,7 @@ import { board as mountBoard } from './helpers/board.js';
 
 const { render: renderSports, BOARD_TEAMS } = sports;
 const { render: renderGolf, BOARD_ROWS, BOARD_PLAYERS } = golf;
-const { render: renderTennis, BOARD_MATCHES, boardDay } = tennis;
+const { render: renderTennis, BOARD_MATCHES, BOARD_ROWS: TENNIS_BOARD_ROWS, boardDay, roundAbbrev } = tennis;
 const { render: renderBus, mapBus, busMin } = bus;
 const MODS = { sports, golf, tennis, bus };
 
@@ -260,7 +260,7 @@ const tennisVm = (n, over = {}) => ({
   ...over,
 });
 
-describe('Tennis: the stacked match rows', () => {
+describe('Tennis: the one-line ledger rows', () => {
   it('registers unconditionally and carries tournament + day in the small text', () => {
     const { card } = board('tennis', renderTennis, tennisVm(3), { size: [3, 8] });
     expect(card.querySelector('.card__more')).toBeNull(); // a 3x8 holds seventeen
@@ -277,15 +277,27 @@ describe('Tennis: the stacked match rows', () => {
     expect(overlay().querySelector('.expand__note').textContent).toBe(boardDay());
   });
 
-  it('stacks the matchup over its score, winner-first when the match is done', () => {
-    const { card } = board('tennis', renderTennis, tennisVm(1), { size: [3, 4] });
+  it('lines up round chip, matchup and score, winner-first when the match is done', () => {
+    const { card } = board('tennis', renderTennis, tennisVm(1, { rows: [match(1, { round: 'Round of 16' })] }), { size: [3, 4] });
     card.click();
     const row = overlay().querySelector('.tennis-board__row');
+    expect(row.querySelector('.tennis-board__round').textContent).toBe('R16');
     expect(row.querySelector('.tennis-board__match b').textContent).toBe('A. Player 1'); // the winner carries the weight
     expect(row.querySelector('.tennis-board__match').textContent).toContain('d.');
     expect(row.querySelector('.tennis-board__match img')).not.toBeNull(); // flags survive
     expect(row.querySelector('.tennis-board__score').textContent).toBe('6-4, 6-2');
     expect(row.querySelector('.tennis-row__live')).toBeNull();
+  });
+
+  it('compresses every feed-real round name and never guesses at one it does not know', () => {
+    expect(roundAbbrev('Round of 16')).toBe('R16'); // slam draw sheets
+    expect(roundAbbrev('Round 3')).toBe('R3'); // regular tour weeks
+    expect(roundAbbrev('Quarterfinal')).toBe('QF');
+    expect(roundAbbrev('Semifinals')).toBe('SF');
+    expect(roundAbbrev('Final')).toBe('F');
+    expect(roundAbbrev('Qualifying 2nd Round')).toBe('Qual');
+    expect(roundAbbrev('Group Stage')).toBe('');
+    expect(roundAbbrev(undefined)).toBe(''); // a feed row with no round at all
   });
 
   it('puts the live dot on the matchup line and the running score beneath', () => {
@@ -311,11 +323,22 @@ describe('Tennis: the stacked match rows', () => {
     expect(overlay().querySelector('.tennis-board__score').textContent).toBe('Walkover');
   });
 
-  it('caps the column at eight matches', () => {
-    const { card } = board('tennis', renderTennis, tennisVm(20), { size: [3, 8] });
+  it('keeps a short board to one column', () => {
+    const { card } = board('tennis', renderTennis, tennisVm(9), { size: [3, 4] });
     card.click();
-    expect(BOARD_MATCHES).toBe(8);
-    expect(overlay().querySelectorAll('.tennis-board__row').length).toBe(8);
+    const grid = overlay().querySelector('.tennis-board');
+    expect(grid.classList.contains('tennis-board--split')).toBe(false);
+    expect(grid.getAttribute('style')).toContain('--board-rows:9');
+  });
+
+  it('deals a deep board into two balanced columns and caps at twenty-six', () => {
+    const { card } = board('tennis', renderTennis, tennisVm(30), { size: [3, 8] });
+    card.click();
+    expect(BOARD_MATCHES).toBe(26);
+    const grid = overlay().querySelector('.tennis-board');
+    expect(grid.classList.contains('tennis-board--split')).toBe(true);
+    expect(grid.getAttribute('style')).toContain(`--board-rows:${TENNIS_BOARD_ROWS}`);
+    expect(overlay().querySelectorAll('.tennis-board__row').length).toBe(26);
   });
 
   it('clears the registration AND the badge between tournaments', () => {
