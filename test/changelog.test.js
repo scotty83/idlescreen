@@ -50,7 +50,7 @@ describe('changelog.json', () => {
     // August 18's rename note was removed 2026-08-21 with the idlescreen
     // rename (each rename retires the previous rename's entry — the Quadrillé
     // note went the same way); the idlescreen entry lands at promote.
-    expect(groups[0].date).toBe('August 27');
+    expect(groups[0].date).toBe('September 1');
     expect(groups[groups.length - 1].date).toBe('Early July');
   });
 });
