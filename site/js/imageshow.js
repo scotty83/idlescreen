@@ -440,6 +440,14 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
   let timer = null;
   let active = 0;
   let stopped = false;
+  // Transition generation, bumped by advance, step and stop. Every preload
+  // captures the generation live at the gesture; only the completion whose
+  // generation is still current may show its item and schedule the next timer.
+  // Clearing `timer` at the top of step cannot cancel a timer an earlier
+  // transition has not created yet — its preload is still in flight — so two
+  // rapid swipes used to schedule two timers and race two rotation chains for
+  // the rest of the session. The generation is what a stale completion loses to.
+  let gen = 0;
 
   host.innerHTML = `
     <div class="slide" data-layer="0"></div>
@@ -497,13 +505,17 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
 
   function advance() {
     if (stopped) return;
+    const mine = ++gen;
     const item = itemAt(pos);
     pos += 1;
     preload(item, () => {
-      // stop() during an in-flight preload must not resurrect the loop: the
-      // pending onload/onerror would otherwise schedule an uncancellable chain.
-      if (stopped) return;
+      // stop() during an in-flight preload must not resurrect the loop, and a
+      // later advance or swipe (which bumped `gen`) supersedes this one: an
+      // outdated completion that showed its item and scheduled its own timer
+      // would leave a second rotation chain running alongside the winner.
+      if (stopped || mine !== gen) return;
       show(item);
+      clearTimeout(timer);
       timer = setTimeout(() => advance(), intervalMs);
     });
   }
@@ -516,6 +528,7 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     },
     stop() {
       stopped = true;
+      gen++; // supersede any preload still in flight
       clearTimeout(timer);
     },
     // Manual navigation (ambient swipe): the whole stage fades through dark
@@ -525,6 +538,7 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     // later by a scheduled change.
     step(dir) {
       if (stopped || !manifest.length) return;
+      const mine = ++gen;
       clearTimeout(timer);
       let item;
       if (dir > 0) {
@@ -537,8 +551,11 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
       }
       const ready = new Promise((res) => preload(item, res));
       swipeFadeThrough(host, ready, () => {
-        if (stopped) return;
+        // A second swipe (or an auto advance) that started after this one owns
+        // the chain now; only the latest gesture shows and re-arms the timer.
+        if (stopped || mine !== gen) return;
         show(item, true);
+        clearTimeout(timer);
         timer = setTimeout(() => advance(), intervalMs);
       });
     },

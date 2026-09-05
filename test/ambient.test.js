@@ -220,6 +220,29 @@ describe('createSlideshow', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(loadedSrcs).toHaveLength(1);
   });
+
+  // F06: a swipe schedules its next auto advance only when its preload finishes,
+  // and clearing the timer at the top of step cannot cancel a timer an earlier,
+  // still-loading swipe has not created yet. Two rapid swipes therefore used to
+  // arm two timers and race two rotation chains for the session.
+  it('two rapid swipes leave exactly one rotation chain', async () => {
+    const host = document.createElement('div');
+    const show = createSlideshow(MANIFEST, host, { intervalMs: 1000, random: () => 0.4 });
+    show.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loadedSrcs).toHaveLength(1); // the first auto advance
+
+    show.step(1); // swipe A: preloads at the gesture
+    show.step(1); // swipe B: before A's dark beat completes
+    await vi.advanceTimersByTimeAsync(SWIPE_OUT_MS + 40); // both dark beats pass
+    const afterSwipes = loadedSrcs.length; // 3: the initial load + the two swipe preloads
+
+    // One interval on, exactly ONE auto advance should fire — one chain, one new
+    // image. Before the fix both swipes' timers fired and loaded two.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loadedSrcs.length - afterSwipes).toBe(1);
+    show.stop();
+  });
 });
 
 describe('stripData', () => {
