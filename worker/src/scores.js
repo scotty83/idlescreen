@@ -30,8 +30,16 @@ export async function fetchTennis() {
   // throws so cached() serves its stale copy instead of an empty card.
   const [atp, wta] = await Promise.allSettled([scoreboard('tennis/atp'), scoreboard('tennis/wta')]);
   if (atp.status === 'rejected' && wta.status === 'rejected') throw new Error('tennis: both tours failed');
-  return mapTennis(
-    atp.status === 'fulfilled' ? atp.value : null,
-    wta.status === 'fulfilled' ? wta.value : null,
-  );
+  // Mark the one-tour-down case partial so cached() gives it the short TTL and,
+  // crucially, never lets the tour-only digest overwrite the complete 24h backup
+  // (same flag f1.js sets). Without it the comment above was aspirational: a WTA
+  // outage cached ATP-only data at full TTL and erased the last good backup.
+  const partial = atp.status === 'rejected' || wta.status === 'rejected';
+  return {
+    ...mapTennis(
+      atp.status === 'fulfilled' ? atp.value : null,
+      wta.status === 'fulfilled' ? wta.value : null,
+    ),
+    ...(partial && { partial: true }),
+  };
 }

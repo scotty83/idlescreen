@@ -645,12 +645,25 @@ describe('golf/tennis digest routes (scores.js)', () => {
     expect(d.name).toBe('Nordea Open');
     expect(d.rows).toHaveLength(1);
     expect(d.rows[0]).toMatchObject({ tour: 'ATP', winner: 'a', sets: '6-4' });
+    // The flag cached() reads to keep the ATP-only digest off the 24h backup.
+    expect(d.partial).toBe(true);
 
     stubFetch([
       { match: /tennis\/atp\/scoreboard/, body: 'down', status: 500 },
       { match: /tennis\/wta\/scoreboard/, body: 'down', status: 500 },
     ]);
     await expect(fetchTennis()).rejects.toThrow('both tours failed');
+  });
+
+  it('fetchTennis leaves partial unset when both tours succeed', async () => {
+    stubFetch([
+      { match: /tennis\/atp\/scoreboard/, body: tennisBody },
+      { match: /tennis\/wta\/scoreboard/, body: tennisBody },
+    ]);
+    const d = await fetchTennis();
+    // A complete digest must NOT carry partial, or cached() would refuse to
+    // refresh the backup and would cap the TTL at 120s for no reason.
+    expect(d.partial).toBeUndefined();
   });
 });
 
