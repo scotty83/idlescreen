@@ -15,7 +15,7 @@ import { newsFeedUrl } from '../../worker/src/news.js';
 import { parseLegs, siriUrl } from '../../worker/src/bus.js';
 import { njtDateToEpoch } from '../../worker/src/njt.js';
 import { mapMtaAlerts } from '../../worker/src/alerts.js';
-import { resetGraphToken } from '../../worker/src/svcstatus.js';
+import { resetGraphToken, fetchServiceStatuses, SVC_DEADLINE_MS } from '../../worker/src/svcstatus.js';
 import STATISTA from './fixtures/statista-cotd.html?raw';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
 
@@ -2136,6 +2136,33 @@ describe('/services/status route', () => {
     expect(digest.services[0]).toMatchObject({ id: 'claude', label: 'Claude', state: 'ok' });
     expect(digest.services[1]).toMatchObject({ id: 'openai', label: 'OpenAI', state: 'ok' });
     expect(digest.services[1].incidents).toEqual([]);
+  });
+
+  it('abandons a hung provider at the deadline so the answered rows still ship (F13)', async () => {
+    // Slack answers instantly; GitHub hangs forever and ignores its abort signal.
+    // Before the overall deadline, fetchServiceStatuses waited on the slowest
+    // source, so one hung provider held the whole digest past the board's 15s
+    // fetch and health's 13s probe and failed the entire card. Now the fan-out
+    // returns at SVC_DEADLINE_MS with GitHub marked unknown (=> partial) and
+    // Slack's answer intact. Fake time so the test doesn't spend the real budget.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn((input) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (/status\.slack\.com/.test(url)) {
+          return Promise.resolve(new Response(JSON.stringify(slackFx), { headers: { 'Content-Type': 'application/json' } }));
+        }
+        return new Promise(() => {}); // github: never resolves, never honours the abort
+      }));
+      const pending = fetchServiceStatuses(['slack', 'github'], env);
+      await vi.advanceTimersByTimeAsync(SVC_DEADLINE_MS + 1000);
+      const digest = await pending;
+      expect(digest.services.find((s) => s.id === 'slack').state).toBe('ok');
+      expect(digest.services.find((s) => s.id === 'github').state).toBe('unknown');
+      expect(digest.partial).toBe(true); // a provider that didn't finish makes the digest partial
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

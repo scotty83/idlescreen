@@ -460,12 +460,29 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 // attempt like any other, so it retries.
 const RETRY_PAUSE_MS = 250;
 
-async function fetchJson(url, { binary = false } = {}) {
+// The whole /services/status fan-out must finish before the health self-probe's
+// 13s deadline (worker/src/health.js) and the board's 15s fetch (site/js/net.js):
+// otherwise 10 + 5 + 5s of retries against ONE slow provider outlives both, and
+// the browser aborts the request so the entire card fails instead of showing the
+// providers that DID answer. Two mechanisms hold the budget: fetchJson is handed
+// the remaining time so it shrinks each attempt's timeout and skips a retry it
+// can't afford, and fetchServiceStatuses abandons any provider still running at
+// the deadline (its row goes unknown, which marks the digest partial).
+export const SVC_DEADLINE_MS = 12000; // under 13s, leaving margin for serialize + cache writes
+const MIN_ATTEMPT_MS = 1200; // don't open an attempt (or retry) with less budget than this
+
+async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) {
+    const remaining = deadline - Date.now();
+    // Out of budget: stop rather than open an attempt that would overrun the
+    // route deadline and take the whole digest down with it.
+    if (remaining < MIN_ATTEMPT_MS) break;
     try {
       const res = await fetch(url, {
-        signal: AbortSignal.timeout(attempt ? 5000 : 10000),
+        // Shrink the per-attempt timeout to whatever budget is left, so the last
+        // attempt can't outlive the overall deadline.
+        signal: AbortSignal.timeout(Math.min(attempt ? 5000 : 10000, remaining)),
         headers: { 'User-Agent': UA },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -479,10 +496,12 @@ async function fetchJson(url, { binary = false } = {}) {
       return binary ? decodeBomJson(await res.arrayBuffer()) : await res.json();
     } catch (e) {
       lastErr = e;
-      if (attempt < 2) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
+      // Only pause before a retry we can still afford (and never past the deadline).
+      if (attempt < 2 && deadline - Date.now() > MIN_ATTEMPT_MS + RETRY_PAUSE_MS) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
     }
   }
-  throw lastErr;
+  // lastErr is unset only if the very first attempt was skipped for lack of budget.
+  throw lastErr ?? new Error('no budget for status request');
 }
 
 // ---------------------------------------------------------------------------
@@ -597,15 +616,18 @@ async function fetchGraphHealth(env) {
 // env is optional: every caller that predates the tenant source (and every test
 // that maps a fixture) may leave it off, and without it the Graph source is
 // simply never reached.
-async function fetchOne(id, env) {
+async function fetchOne(id, env, deadline = Infinity) {
   const svc = SERVICES[id];
   if (svc.adapter === 'm365') {
     // All sources in parallel, each with its own retries; any of them may come
     // back null without blanking the row (mapM365 composes whatever answered).
     // Graph runs alongside the public feeds rather than ahead of them, so a
     // tenant that is misconfigured or mid-outage costs the fallback no latency.
+    // The public feeds honour the route deadline; the optional Graph call keeps
+    // its own (shorter) internal timeouts and is capped by the withDeadline guard
+    // in fetchServiceStatuses rather than threaded through here.
     const [consumer, mirror, graph] = await Promise.all([
-      ...svc.urls.map((u) => fetchJson(u).catch((e) => {
+      ...svc.urls.map((u) => fetchJson(u, { deadline }).catch((e) => {
         console.warn(`[svcstatus] m365 source failed (${u}): ${String(e?.message ?? e)}`);
         return null;
       })),
@@ -619,12 +641,29 @@ async function fetchOne(id, env) {
     ]);
     return { id, label: svc.label, ...mapM365(consumer, mirror, Date.now(), graph) };
   }
-  const json = await fetchJson(svc.url, { binary: svc.adapter === 'aws' });
+  const json = await fetchJson(svc.url, { binary: svc.adapter === 'aws', deadline });
   return { id, label: svc.label, ...MAPPERS[svc.adapter](json, Date.now()) };
 }
 
+// Abandon a provider still running when the overall route budget lapses, so one
+// slow or hung source can't hold the digest past the health probe's deadline. The
+// loser settles as a rejection, which fetchServiceStatuses reads as an unknown
+// row (and thus a partial digest); the orphaned fetch is cut with the request
+// context. This is the backstop under fetchJson's own budget-aware timeouts, and
+// the only cap on the optional Graph tenant call.
+function withDeadline(promise, deadline) {
+  const ms = deadline - Date.now();
+  if (ms <= 0) return Promise.reject(new Error('service deadline exceeded'));
+  let timer;
+  const guard = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('service deadline exceeded')), ms); });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 export async function fetchServiceStatuses(ids, env) {
-  const settled = await Promise.allSettled(ids.map((id) => fetchOne(id, env)));
+  // One shared deadline for the whole fan-out (not per provider), so N slow
+  // providers can't each spend the full budget in series behind Promise.allSettled.
+  const deadline = Date.now() + SVC_DEADLINE_MS;
+  const settled = await Promise.allSettled(ids.map((id) => withDeadline(fetchOne(id, env, deadline), deadline)));
   const services = settled.map((s, i) => (s.status === 'fulfilled' ? s.value
     : { id: ids[i], label: SERVICES[ids[i]].label, state: 'unknown', note: 'Status unavailable', incidents: [] }))
     // An unknown row ALWAYS says why. The card prints .svc__note in amber under
