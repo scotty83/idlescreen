@@ -203,6 +203,76 @@ describe('the slideshow', () => {
   });
 });
 
+describe('a long-running photo screensaver renews its signed URLs', () => {
+  // iCloud/Drive URLs expire after hours; a slideshow that keeps its original
+  // array shows dead links until the nightly reload. The engine must receive
+  // renewed manifests on a bounded cadence and after an image failure (F11).
+  const v1 = [
+    { img: 'https://x.test/p1-v1.jpg', title: 'One', date: 'd1' },
+    { img: 'https://x.test/p2-v1.jpg', title: 'Two', date: 'd2' },
+  ];
+  const v2 = v1.map((p) => ({ ...p, img: p.img.replace('-v1', '-v2') }));
+
+  it('re-resolves the manifest on the ~20-minute cadence, not before', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    let call = 0;
+    initScreensaver({ photos: async () => (call++ === 0 ? v1 : v2), backdrops: async () => [] });
+
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(1);
+    expect(bgOf($('#slideshow .slide[data-active]'))).toContain('-v1');
+
+    // A re-entry inside the TTL does not re-resolve.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(1);
+
+    // Past the 20-minute TTL, the next re-entry renews it.
+    await vi.advanceTimersByTimeAsync(11 * 60 * 1000); // now 21 min in
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(2);
+
+    // The renewed URLs reach the glass on the next auto advance (30-min every).
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    await flush();
+    expect(bgOf($('#slideshow .slide[data-active]'))).toContain('-v2');
+  });
+
+  it('renews at once when a photo fails to load, without waiting for the TTL', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    // v1 links are dead (expired); v2 links load.
+    vi.stubGlobal('Image', class {
+      set src(v) { queueMicrotask(() => (String(v).includes('-v1') ? this.onerror?.() : this.onload?.())); }
+    });
+    let call = 0;
+    initScreensaver({ photos: async () => (call++ === 0 ? v1 : v2), backdrops: async () => [] });
+
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    await flush(); // the dead first photo fires onImageError → a forced refresh
+    await flush();
+    expect(call).toBe(2);
+  });
+
+  it('leaves art/curated manifests alone — their URLs do not expire', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    let call = 0;
+    initScreensaver({ photos: async () => { call++; return PHOTOS; }, backdrops: async () => [] });
+
+    setMode('ambient', ART); // art source: stable URLs
+    await flush();
+    expect(call).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(25 * 60 * 1000); // well past the TTL
+    setMode('ambient', ART);
+    await flush();
+    expect(call).toBe(1); // no needless refetch for a non-signed source
+  });
+});
+
 describe('the daily backdrop', () => {
   it('opens on the day pick and advances it across local midnight', async () => {
     vi.setSystemTime(new Date(2026, 7, 11, 22, 30)); // local, on purpose: the pick is keyed to the local day

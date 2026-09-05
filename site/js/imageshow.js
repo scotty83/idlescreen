@@ -432,9 +432,19 @@ function warmNeighbors() {
   }
 }
 
+// URL-independent identity for a photo across a manifest refresh: a renewed
+// signed URL is a NEW url for the SAME shot, so match on the stable fields
+// (date, title) and fall back to the url only when a source carries neither.
+const shotKey = (p) => {
+  if (!p) return '';
+  const stable = `${p.date ?? ''}|${p.title ?? ''}`;
+  return stable === '|' ? String(p.img ?? '') : stable;
+};
+
 // Ambient slideshow engine: two stacked layers, crossfade via [data-active].
-// deps.now/random are injectable for tests.
-export function createSlideshow(manifest, host, { intervalMs = 75000, random = Math.random, fit = 'contain' } = {}) {
+// deps.now/random are injectable for tests. onImageError fires when a photo
+// fails to load (an expired signed URL), so the caller can renew the manifest.
+export function createSlideshow(manifest, host, { intervalMs = 75000, random = Math.random, fit = 'contain', onImageError = null } = {}) {
   let order = shuffle([...manifest.keys()], random);
   let pos = 0;
   let timer = null;
@@ -498,9 +508,14 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
 
   // Decode before the crossfade starts, so the incoming layer is a finished
   // picture the moment it becomes visible (a broken URL resolves too; the
-  // background-image will retry).
+  // background-image will retry). A failed decode (`ok === false`) is usually an
+  // expired signed URL — tell the caller so it can renew the manifest before the
+  // next advance hits another dead link.
   function preload(item, done) {
-    loadImage(new Image(), item.img).then(() => done());
+    loadImage(new Image(), item.img).then((ok) => {
+      if (!ok) onImageError?.(item);
+      done(ok);
+    });
   }
 
   function advance() {
@@ -561,6 +576,20 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     },
     current() {
       return manifest[order[Math.max(pos - 1, 0)]] ?? null;
+    },
+    // Swap in a renewed manifest (fresh signed URLs) without disturbing what is
+    // on the glass: the current photo is preserved by stable identity, so the
+    // deck resumes just past it rather than jumping, and the auto advance and any
+    // in-flight transition keep running. Only the URLs the NEXT pictures load
+    // from change. A newer array is a different shuffle, which is fine for a
+    // screensaver; what matters is that later photos load from live links.
+    updateManifest(next) {
+      if (!Array.isArray(next) || !next.length) return;
+      const cur = manifest[order[Math.max(pos - 1, 0)]] ?? null;
+      manifest = next;
+      order = shuffle([...manifest.keys()], random);
+      const at = cur ? order.findIndex((i) => shotKey(manifest[i]) === shotKey(cur)) : -1;
+      pos = at >= 0 ? at + 1 : 0;
     },
   };
 }

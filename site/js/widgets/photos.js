@@ -17,4 +17,5 @@ export const meta = widget.meta;
 export const render = widget.render;
 export const fetchData = widget.fetchData;
 export const photoManifest = widget.photoManifest;
+export const photoManifestAt = widget.photoManifestAt;
 export const mapPhotos = mapPhotosCore;

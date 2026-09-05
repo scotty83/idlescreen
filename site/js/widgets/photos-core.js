@@ -27,6 +27,8 @@ export function mapPhotos(digest) {
 // carries its own title (e.g. "Landscapes").
 export function createPhotoWidget({ id, cfgKey, endpoint, emptyAction, emptyDest, curated }) {
   let sessionList = []; // most recent fetch, for the viewer to browse
+  let sessionAt = 0; // when sessionList was last filled — its freshness, for the
+                     // ambient manifest to decide whether to trust it or refetch
 
   // refreshMs is the render cadence, not the photo-change rate: like Art, the
   // widget re-renders every minute and the shown photo only changes when the
@@ -43,6 +45,7 @@ export function createPhotoWidget({ id, cfgKey, endpoint, emptyAction, emptyDest
 
   function render(el, vm, cfg) {
     sessionList = vm.photos ?? [];
+    if (sessionList.length) sessionAt = Date.now(); // a fresh, non-empty render
     if (!sessionList.length) {
       // Curated sources have nothing for the user to set up, so a setup prompt
       // would be wrong — show a neutral placeholder instead.
@@ -78,6 +81,9 @@ export function createPhotoWidget({ id, cfgKey, endpoint, emptyAction, emptyDest
 
   // Used by ambient mode when these photos are the chosen screensaver source.
   const photoManifest = () => sessionList;
+  // ...and how fresh that list is, so the ambient resolver can refetch a manifest
+  // whose signed URLs may have expired instead of trusting any nonempty list.
+  const photoManifestAt = () => sessionAt;
 
   async function fetchData(cfg, net) {
     const album = curated ? curated.folder : cfg?.[cfgKey]?.album;
@@ -85,5 +91,5 @@ export function createPhotoWidget({ id, cfgKey, endpoint, emptyAction, emptyDest
     return mapPhotos(await net.fetchJSON(`${WORKER_URL}${endpoint}${encodeURIComponent(album)}`));
   }
 
-  return { meta, render, photoManifest, fetchData, mapPhotos };
+  return { meta, render, photoManifest, photoManifestAt, fetchData, mapPhotos };
 }
