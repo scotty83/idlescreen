@@ -268,7 +268,9 @@ let stripTimer = null;
 let viewerList = null; // photo list for the open viewer session
 let viewerCaption = true; // whether this session shows captions at all (chart: false)
 let viewerIndex = -1;
-let viewerGen = 0; // bumped per open; kept for session identity
+let viewerGen = 0; // bumped per open; session identity for a deferred swipe
+let viewerNav = 0; // bumped per navigation (swipe) and per open/close: a slow
+                   // decode from an earlier swipe must not land after a later one
 let userStepped = false; // guards against clobbering a swipe with deferred state
 
 // Put the caption box where the content says it belongs: create it only when
@@ -303,8 +305,11 @@ registerSurface('art viewer', '#art-viewer', whileShown);
 // fit is the widget's own screensaver fit (config.js imageFit): 'contain'
 // letterboxes, 'cover' fills the glass and crops.
 export function openImageViewer(current, cfg, { list = [], caption = true, strip = true, fit = 'contain' } = {}) {
-  // Reset session state synchronously.
+  // Reset session state synchronously. The nav bump supersedes any swipe from a
+  // previous session whose decode is still in flight, so it cannot paint over
+  // the album just opened.
   ++viewerGen;
+  ++viewerNav;
   userStepped = false;
   let viewer = document.querySelector('#art-viewer');
   if (!viewer) {
@@ -327,6 +332,7 @@ export function openImageViewer(current, cfg, { list = [], caption = true, strip
         viewer.hidden = true;
         clearInterval(stripTimer);
         viewerList = null; // release the album; reopen passes a fresh list
+        ++viewerNav; // a swipe still decoding when the viewer closes is void
       },
     });
     document.body.appendChild(viewer);
@@ -395,10 +401,19 @@ function step(viewer, dir) {
   viewerIndex = (viewerIndex + dir + viewerList.length) % viewerList.length;
   const item = viewerList[viewerIndex];
   const imgEl = viewer.querySelector('.art-viewer__img');
+  // Captured before the decode: a swipe toward B that loads slowly must not
+  // land after a later swipe toward C already did, and neither may paint over a
+  // viewer that has since closed or reopened onto another album. The session
+  // (viewerGen), the latest navigation (viewerNav), the viewer still being up,
+  // and imgEl still being the live image all have to hold before the swap.
+  const gen = viewerGen;
+  const nav = ++viewerNav;
   // The one swipe grammar (swipeFadeThrough): the photo dims at the gesture,
   // the src/caption swap happens in the dark, and the new photo rises. The
   // decode rides the dark beat; neighbors are pre-warmed so it rarely waits.
   swipeFadeThrough(imgEl, loadImage(new Image(), item.img), () => {
+    if (gen !== viewerGen || nav !== viewerNav || viewer.hidden) return;
+    if (viewer.querySelector('.art-viewer__img') !== imgEl) return;
     imgEl.src = item.img;
     imgEl.alt = item.title ?? '';
     renderViewerCaption(viewer, item);
