@@ -102,6 +102,23 @@ export function loadCache(id) {
   }
 }
 
+// The timestamp a payload should be STORED under. A Worker stale fallback (up to
+// 24h old) carries the age of the DATA in its digest envelope (updatedAt, epoch
+// seconds); stamping such a payload with the wall clock instead resets its
+// displayed age to "now" on every save, so a noon reload of an 8 AM digest would
+// claim "as of 12 PM". A fresh payload carries no updatedAt and falls back to now.
+export function cacheStampFor(data) {
+  return Number.isFinite(data?.updatedAt) ? data.updatedAt : Math.floor(Date.now() / 1000);
+}
+
+// The timestamp a cached entry should DISPLAY as its "as of": the payload's own
+// source time when it has one (which also corrects caches written by an older
+// build before cacheStampFor existed), else the moment it was written. Epoch
+// seconds, the unit markStale reads.
+export function cacheAgeOf(cached) {
+  return cached?.data?.updatedAt ?? cached?.t ?? null;
+}
+
 /* ---------- pending edit-mode handoff ---------- */
 
 // Settings → Widgets hands off to edit mode, and when it has changes to save

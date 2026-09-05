@@ -1,7 +1,7 @@
 // Boot and runtime orchestration for the signage dashboard.
 
 import { normalizeConfig, decodeConfig, CURATED_SOURCES } from './config.js';
-import { loadConfig, saveConfig, loadCache, saveCache, takePendingEdit, applyConfig, isDemoSession } from './store.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, takePendingEdit, applyConfig, isDemoSession } from './store.js';
 import { fetchJSON, fetchBuffer, fetchText } from './net.js';
 import { fitViewport, narrowViewportToGlass } from './util.js';
 import { cardFor, markFresh, markStale, setCardConfigSource } from './card.js';
@@ -144,12 +144,16 @@ function startWidget(mod, rect, startDelayMs = 0) {
   const cached = loadCache(mod.meta.id);
   if (cached) {
     renderWidget(mod, cached.data);
-    markStale(card, cached.t);
+    // The payload's own source time, not the moment it was written: a Worker
+    // stale fallback must read as old as its data is (F10).
+    markStale(card, cacheAgeOf(cached));
   }
   const cancel = schedule(async () => {
     try {
       const vm = await mod.fetchData(cfg, net);
-      saveCache(mod.meta.id, vm);
+      // Persist the payload's source age so a stale digest keeps its true "as
+      // of" across a reload instead of being re-stamped to now (F10).
+      saveCache(mod.meta.id, vm, cacheStampFor(vm));
       renderWidget(mod, vm);
       // A worker-served stale fallback (up to 24h old) must not read as fresh:
       // dim the card and stamp its age instead of clearing the stale mark.
@@ -159,7 +163,7 @@ function startWidget(mod, rect, startDelayMs = 0) {
       reportWidgetHealth(mod.meta.id, vm?.stale ? 'stale' : null);
     } catch (err) {
       reportWidgetHealth(mod.meta.id, 'error');
-      markStale(card, loadCache(mod.meta.id)?.t);
+      markStale(card, cacheAgeOf(loadCache(mod.meta.id)));
       throw err; // let the scheduler back off
     }
   }, mod.meta.refreshMs, { startDelayMs });

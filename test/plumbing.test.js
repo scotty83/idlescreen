@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { loadConfig, saveConfig, loadCache, saveCache } from '../site/js/store.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf } from '../site/js/store.js';
 import { schedule } from '../site/js/scheduler.js';
 import { resolveMode, stepTime, fmtHM } from '../site/js/modes.js';
 import { normalizeConfig, encodeConfig } from '../site/js/config.js';
@@ -36,6 +36,46 @@ describe('store', () => {
     saveCache('weather', { now: { temp: 80 } }, 1234);
     expect(loadCache('weather')).toEqual({ t: 1234, data: { now: { temp: 80 } } });
     expect(loadCache('missing')).toBeNull();
+  });
+});
+
+// F10: a Worker stale fallback carries its data's own age (updatedAt); storing
+// it under the wall clock, and reading the storage time back, resets the
+// displayed "as of" to now on every reload.
+describe('cache freshness stamps', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('stamps a stale payload with its own source time, not the wall clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T12:00:00Z')); // "now" = noon
+    const eightAm = Math.floor(new Date('2026-09-04T08:00:00Z').getTime() / 1000);
+    expect(cacheStampFor({ stale: true, updatedAt: eightAm })).toBe(eightAm);
+  });
+
+  it('falls back to now for a fresh payload with no source time', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T12:00:00Z'));
+    const now = Math.floor(Date.now() / 1000);
+    expect(cacheStampFor({ temp: 80 })).toBe(now);
+    expect(cacheStampFor(undefined)).toBe(now);
+    expect(cacheStampFor({ updatedAt: NaN })).toBe(now);
+  });
+
+  it('prefers a payload updatedAt over the write time when showing age', () => {
+    const eightAm = 1_757_318_400; // some epoch seconds
+    // Written at noon, but the digest is from 8 AM: 8 AM is the age to show.
+    expect(cacheAgeOf({ t: eightAm + 4 * 3600, data: { updatedAt: eightAm } })).toBe(eightAm);
+    // No source time: the write time is all we have.
+    expect(cacheAgeOf({ t: 500, data: { temp: 80 } })).toBe(500);
+    expect(cacheAgeOf({ t: 500, data: null })).toBe(500);
+    expect(cacheAgeOf(null)).toBeNull();
+  });
+
+  it('round-trips a stale payload so a reload keeps its true age', () => {
+    const eightAm = 1_757_318_400;
+    const vm = { stale: true, updatedAt: eightAm, temp: 72 };
+    saveCache('weather', vm, cacheStampFor(vm));
+    expect(cacheAgeOf(loadCache('weather'))).toBe(eightAm);
   });
 });
 
