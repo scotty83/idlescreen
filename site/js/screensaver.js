@@ -51,6 +51,11 @@ let source = null; // the ambient source in force, for step() and the minute re-
 let slideshow = null;
 let clockface = null; // minute-tick clock screensaver engine (clockfaces.js)
 let slideshowStarting = false; // guards the await gap in startSlideshow
+// Slideshow lifecycle generation, bumped whenever the board leaves ambient or
+// the ambient source changes. startSlideshow captures it before awaiting the
+// manifest; a resolution whose generation is stale must not build an engine
+// behind the dashboard or install a source the board has since moved off.
+let slideshowGen = 0;
 let backdropGen = 0; // guards the await gap in applyBackdrop (mode can flip mid-fetch)
 let backdropList = []; // full curated backdrop set, for swipe-to-next
 let backdropIndex = 0; // which backdrop is showing (starts at the daily pick)
@@ -101,8 +106,12 @@ export function isAmbient() {
 // album that came back empty is retried). Every step below is therefore either
 // a no-op when nothing changed or guarded against running twice.
 export function setMode(mode, cfg) {
+  const prevSource = source;
   source = ambientSource(cfg);
   ambient = mode === 'ambient' && source !== null;
+  // A source swap invalidates any slideshow still starting for the old one; the
+  // leave() below covers dropping out of ambient entirely.
+  if (source !== prevSource) slideshowGen++;
   document.body.classList.toggle('mode-ambient', ambient);
   // Clock faces reserve extra bottom space when the info strip is showing, so a
   // wrapped (two-row) world-clock grid centers above the strip instead of
@@ -135,6 +144,7 @@ function enter(cfg) {
 // reload, and the backdrop's generation bump abandons any folder fetch still in
 // flight so it cannot paint over the dashboard when it lands.
 function leave() {
+  slideshowGen++; // a manifest still resolving must not start a slideshow now
   if (slideshow) { slideshow.stop(); slideshow = null; }
   if (clockface) { clockface.stop(); clockface = null; }
   applyBackdrop(false);
@@ -149,7 +159,12 @@ async function startSlideshow(cfg) {
   slideshowStarting = true;
   try {
     const src = source;
+    const bornGen = slideshowGen;
     const manifest = await photosFor(src);
+    // The await is a gap the schedule can drive through: the board may have gone
+    // to the dashboard, or switched sources, while the album was fetching. Only
+    // build the engine if the world it was started for is still the one in force.
+    if (!ambient || source !== src || slideshowGen !== bornGen) return;
     if (!manifest?.length) return; // don't lock an empty slideshow; retry next setMode
     // Each ambient source owns its interval: the chosen photo widget's every for
     // its slideshow, the curated source's user rotation (its own default), art's

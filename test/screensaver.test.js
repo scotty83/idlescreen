@@ -23,6 +23,10 @@ const BACKDROPS = [1, 2, 3, 4, 5].map((n) => ({ img: `https://x.test/b${n}.jpg`,
 
 const ART = { screensaver: { source: 'art', strip: true }, art: { every: 30 } };
 const CLOCK = { screensaver: { source: 'clock', strip: true, backdrop: true } };
+// Two distinct photo sources, for the lifecycle-generation guard: switching
+// between them changes the ambient source while a manifest may be in flight.
+const PHOTOS_CFG = { screensaver: { source: 'photos', strip: true }, photos: { album: 'A', every: 30 } };
+const GDRIVE_CFG = { screensaver: { source: 'gdrivephotos', strip: true }, gdrivephotos: { album: 'B', every: 30 } };
 
 // index.html's ambient nodes, which the engine addresses by id.
 function mountBoard() {
@@ -145,6 +149,46 @@ describe('the slideshow', () => {
     await flush();
     expect(asked).toBe(2);
     expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(2);
+  });
+
+  it('a manifest that resolves after the board left ambient never starts a hidden slideshow', async () => {
+    // A slow album fetch begins just before the schedule flips to dashboard; its
+    // late response must not spin an engine and a rotation timer behind the grid.
+    const gate = deferred();
+    initScreensaver({
+      photos: async () => { await gate.promise; return PHOTOS; },
+      backdrops: async () => [],
+    });
+
+    setMode('ambient', ART);
+    await flush();
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0); // still fetching
+
+    setMode('dashboard', ART); // the schedule window opened while the album was in flight
+    gate.resolve();
+    await flush();
+    expect(isAmbient()).toBe(false);
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0); // nothing spun up behind the grid
+  });
+
+  it('a manifest for a source the board has since left does not install that source', async () => {
+    const gate = deferred();
+    const served = [];
+    initScreensaver({
+      photos: async (src) => { served.push(src); await gate.promise; return PHOTOS; },
+      backdrops: async () => [],
+    });
+
+    setMode('ambient', PHOTOS_CFG); // starts fetching the iCloud album
+    await flush();
+    expect(served).toEqual(['photos']);
+
+    setMode('ambient', GDRIVE_CFG); // source switched to Drive while the fetch was in flight
+    gate.resolve();
+    await flush();
+    // The iCloud manifest resolves now, but the board is on gdrivephotos: the
+    // obsolete source must not be installed behind the current one.
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0);
   });
 
   it('stops the slideshow on the way out', async () => {
