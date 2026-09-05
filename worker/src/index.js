@@ -17,7 +17,7 @@ import { fetchServiceStatuses, mendServiceStatuses, SERVICES } from './svcstatus
 import { fetchApod } from './apod.js';
 import { fetchCitibike } from './citibike.js';
 import { fetchTfl } from './tfl.js';
-import { parseBeacon, beaconDataPoint, deviceModel, originHost } from './fleet.js';
+import { parseBeacon, beaconDataPoint, deviceModel, originHost, MAX_BODY as BEACON_MAX_BYTES } from './fleet.js';
 import { fetchChart, CHART_TOPICS } from './chart.js';
 import { fetchF1, mendF1 } from './f1.js';
 import { fetchGolf, fetchTennis } from './scores.js';
@@ -43,12 +43,52 @@ const json = (body, status = 200, extra = {}) =>
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789';
 const CODE_TTL_S = 3600;
 const MAX_CFG_CHARS = 4096;
+// Transport ceiling for the /code body. MAX_CFG_CHARS bounds the cfg FIELD, not
+// the request, so it sits comfortably above a MAX_CFG_CHARS cfg even fully
+// \u-escaped (~6 bytes/char = ~24 KB) plus envelope. Anything larger is rejected
+// before we buffer or parse it, so a huge unrelated field can't sneak past the
+// field check by riding a body that was already fully read.
+const MAX_CODE_BODY_BYTES = 32 * 1024;
 
 function randomCode() {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   let code = '';
   for (const b of bytes) code += CODE_ALPHABET[b % 32];
   return code;
+}
+
+// Read at most `limit` bytes of the request body, then decode to text. Rejects
+// an oversized Content-Length up front and, because that header can lie or be
+// absent, also counts the bytes actually streamed and cancels the moment they
+// pass the limit — so nothing larger than `limit` is ever buffered or parsed.
+// Returns null when the body is too large or unreadable; the caller maps that to
+// its own 4xx.
+async function readBounded(request, limit) {
+  const declared = Number(request.headers.get('Content-Length'));
+  if (Number.isFinite(declared) && declared > limit) return null;
+  const body = request.body;
+  if (!body) return '';
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null; // aborted upload or stream error — the sender's problem, not a 1101
+  }
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { buf.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(buf);
 }
 
 async function postCode(request, env, origin) {
@@ -62,10 +102,20 @@ async function postCode(request, env, origin) {
   const throttleKey = new Request(`${origin}/__throttle/code/${encodeURIComponent(ip)}`);
   const cache = caches.default;
   if (await cache.match(throttleKey)) return json({ error: 'rate_limited' }, 429);
+  // Install the speed bump BEFORE reading or parsing the body. It used to be set
+  // only after a request validated, so a flood of malformed or oversized bodies
+  // slipped past the throttle entirely and could hammer this route unbounded.
+  await cache.put(throttleKey, new Response('1', { headers: { 'Cache-Control': 'max-age=10' } }));
 
+  // Bound the transport read before buffering/parsing: the cfg-length check below
+  // only guards the FIELD, so an oversized body (a huge unrelated field, or one
+  // with no honest Content-Length) would otherwise be fully allocated and parsed
+  // before we could reject it.
+  const raw = await readBounded(request, MAX_CODE_BODY_BYTES);
+  if (raw === null) return json({ error: 'cfg_too_large' }, 413);
   let body;
   try {
-    body = await request.json();
+    body = JSON.parse(raw);
   } catch {
     return json({ error: 'invalid_json' }, 400);
   }
@@ -73,7 +123,6 @@ async function postCode(request, env, origin) {
     return json({ error: 'missing_cfg' }, 400);
   }
   if (body.cfg.length > MAX_CFG_CHARS) return json({ error: 'cfg_too_large' }, 413);
-  await cache.put(throttleKey, new Response('1', { headers: { 'Cache-Control': 'max-age=10' } }));
   for (let attempt = 0; attempt < 3; attempt++) {
     const code = randomCode();
     try {
@@ -388,11 +437,11 @@ const handlers = {
     if (path === '/fleet' && request.method === 'POST') {
       // Anonymous usage heartbeat → Analytics Engine (see fleet.js). No KV,
       // no caching. A missing ANALYTICS binding (self-host without metrics)
-      // accepts and drops so boards never see an error. parseBeacon bounds
-      // the body size itself (oversized → 400).
-      // Body read can reject on an aborted upload; that's the sender's problem,
-      // not a 1101.
-      const raw = await request.text().catch(() => null);
+      // accepts and drops so boards never see an error. readBounded caps the
+      // transport read at parseBeacon's own ceiling, so an oversized upload is
+      // rejected without buffering it (and an aborted upload just reads null —
+      // the sender's problem, not a 1101).
+      const raw = await readBounded(request, BEACON_MAX_BYTES);
       const parsed = raw === null ? null : parseBeacon(raw);
       if (!parsed) return json({ error: 'bad_beacon' }, 400);
       // Country is edge-derived (request.cf.country, CF-IPCountry header at the

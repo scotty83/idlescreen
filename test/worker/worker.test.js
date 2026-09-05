@@ -235,10 +235,29 @@ describe('/code exchange', () => {
     expect(res.status).toBe(200);
   });
   it('rejects bad bodies and oversized configs', async () => {
-    expect((await call('/code', { method: 'POST', body: 'not json' })).status).toBe(400);
-    expect((await call('/code', { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
+    // Distinct IPs so the per-IP throttle (now set before the body is read, so
+    // malformed requests count too) doesn't mask the second and third response.
+    const from = (n) => ({ 'CF-Connecting-IP': `172.16.0.${n}` });
+    expect((await call('/code', { method: 'POST', body: 'not json', headers: from(1) })).status).toBe(400);
+    expect((await call('/code', { method: 'POST', body: JSON.stringify({}), headers: from(2) })).status).toBe(400);
     const big = JSON.stringify({ cfg: 'x'.repeat(5000) });
-    expect((await call('/code', { method: 'POST', body: big })).status).toBe(413);
+    expect((await call('/code', { method: 'POST', body: big, headers: from(3) })).status).toBe(413);
+  });
+  it('bounds the transport body and denies malformed bodies a throttle bypass', async () => {
+    // A valid small cfg hidden inside a huge padding field used to be buffered
+    // and parsed in full before the cfg-length check ran — the transport cap now
+    // rejects it before either. (Before this fix the small cfg minted a 200.)
+    const padded = JSON.stringify({ cfg: 'x', pad: 'p'.repeat(40000) });
+    expect((await call('/code', { method: 'POST', body: padded, headers: { 'CF-Connecting-IP': '172.17.0.1' } })).status).toBe(413);
+
+    // A malformed body used to return 400 WITHOUT installing the throttle marker,
+    // so an attacker could hammer /code forever. The marker is now set before the
+    // body is read, so the same IP's next request is throttled. (Before the fix
+    // the follow-up minted a 200.)
+    const bad = await call('/code', { method: 'POST', body: 'not json', headers: { 'CF-Connecting-IP': '172.17.0.2' } });
+    expect(bad.status).toBe(400);
+    const next = await call('/code', { method: 'POST', body: JSON.stringify({ cfg: 'ok' }), headers: { 'CF-Connecting-IP': '172.17.0.2' } });
+    expect(next.status).toBe(429);
   });
   it('404s unknown codes', async () => {
     expect((await call('/code/ZZZZZZ')).status).toBe(404);

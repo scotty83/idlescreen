@@ -3,7 +3,9 @@
 // No KV (write caps), no caching, no PII — the device id is a random UUID the
 // board generates locally, and tz is the coarse IANA zone name.
 
-const MAX_BODY = 2048;
+// Exported so the /fleet route can bound the transport read to the same ceiling
+// parseBeacon enforces, rejecting an oversized upload before buffering it.
+export const MAX_BODY = 2048;
 const MODES = new Set(['scheduled', 'dashboard', 'ambient']);
 
 // Numeric beacon fields: a plain count with a sane ceiling. Anything that is
