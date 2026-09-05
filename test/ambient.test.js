@@ -220,6 +220,60 @@ describe('createSlideshow', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(loadedSrcs).toHaveLength(1);
   });
+
+  // F06: a swipe schedules its next auto advance only when its preload finishes,
+  // and clearing the timer at the top of step cannot cancel a timer an earlier,
+  // still-loading swipe has not created yet. Two rapid swipes therefore used to
+  // arm two timers and race two rotation chains for the session.
+  it('two rapid swipes leave exactly one rotation chain', async () => {
+    const host = document.createElement('div');
+    const show = createSlideshow(MANIFEST, host, { intervalMs: 1000, random: () => 0.4 });
+    show.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loadedSrcs).toHaveLength(1); // the first auto advance
+
+    show.step(1); // swipe A: preloads at the gesture
+    show.step(1); // swipe B: before A's dark beat completes
+    await vi.advanceTimersByTimeAsync(SWIPE_OUT_MS + 40); // both dark beats pass
+    const afterSwipes = loadedSrcs.length; // 3: the initial load + the two swipe preloads
+
+    // One interval on, exactly ONE auto advance should fire — one chain, one new
+    // image. Before the fix both swipes' timers fired and loaded two.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loadedSrcs.length - afterSwipes).toBe(1);
+    show.stop();
+  });
+
+  // F11: a signed-URL manifest expires while a screensaver runs for hours.
+  // updateManifest swaps in renewed URLs, keeping the current photo by stable
+  // identity (a renewed signed URL is a new url for the SAME shot) and loading
+  // later photos from the fresh links.
+  it('updateManifest renews URLs, preserving the current photo by identity', async () => {
+    const host = document.createElement('div');
+    const original = [
+      { img: 'https://x/a-old.jpg', title: 'A', date: '2026-01-01', ar: 1.5 },
+      { img: 'https://x/b-old.jpg', title: 'B', date: '2026-01-02', ar: 1.5 },
+    ];
+    const show = createSlideshow(original, host, { intervalMs: 1000, random: () => 0 });
+    show.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const before = show.current();
+
+    // Same shots (date/title), fresh signed URLs.
+    const renewed = original.map((p) => ({ ...p, img: p.img.replace('-old', '-new') }));
+    show.updateManifest(renewed);
+
+    const after = show.current();
+    expect(after.title).toBe(before.title);            // same photo,
+    expect(after.date).toBe(before.date);
+    expect(after.img).toBe(before.img.replace('-old', '-new')); // renewed URL
+
+    // The next auto advance loads from a renewed link, not a dead one.
+    const n = loadedSrcs.length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loadedSrcs.slice(n).every((s) => s.includes('-new'))).toBe(true);
+    show.stop();
+  });
 });
 
 describe('stripData', () => {
@@ -359,11 +413,12 @@ describe('photos screensaver cold-boot — manifest resolution', () => {
     expect(manifest[0].img).toBe(photo.img);
   });
 
-  it('skips fetchData() when photoManifest() is already populated (warm cache)', async () => {
+  it('skips fetchData() when photoManifest() is populated AND fresh (warm cache)', async () => {
     const photo = { img: 'https://example.com/cached.jpg', ar: 1.5, title: 'Cached' };
     const fetchDataMock = vi.fn();
     const photosMod = {
       photoManifest: () => [photo], // warm: render() ran earlier
+      photoManifestAt: () => Date.now(), // ...and just now, so its URLs are fresh
       fetchData: fetchDataMock,
     };
     const cfg = { photos: { source: 'icloud', album: 'B1m5fk75vLWwX' } };
@@ -374,6 +429,39 @@ describe('photos screensaver cold-boot — manifest resolution', () => {
     expect(fetchDataMock).not.toHaveBeenCalled();
     expect(manifest).toHaveLength(1);
     expect(manifest[0]).toBe(photo);
+  });
+
+  // F11: a nonempty list is no longer trusted forever. A manifest that has sat
+  // long enough for its signed URLs to expire is refetched, not reused.
+  it('refetches when the rendered list is stale (its signed URLs may have expired)', async () => {
+    const stale = { img: 'https://example.com/expired.jpg', ar: 1.5, title: 'Old', date: '2026-01-01' };
+    const fresh = { img: 'https://example.com/renewed.jpg', ar: 1.5, title: 'Old', date: '2026-01-01' };
+    const fetchDataMock = vi.fn().mockResolvedValue({ photos: [fresh] });
+    const photosMod = {
+      photoManifest: () => [stale],
+      photoManifestAt: () => Date.now() - 30 * 60 * 1000, // half an hour old
+      fetchData: fetchDataMock,
+    };
+    const cfg = { photos: { source: 'icloud', album: 'B1m5fk75vLWwX' } };
+    const net = { fetchJSON: vi.fn() };
+
+    const manifest = await resolvePhotosManifest(cfg, net, photosMod);
+
+    expect(fetchDataMock).toHaveBeenCalledWith(cfg, net);
+    expect(manifest[0].img).toBe('https://example.com/renewed.jpg');
+  });
+
+  it('keeps the last good list when a stale-triggered refetch comes back empty', async () => {
+    const stale = { img: 'https://example.com/expired.jpg', ar: 1.5, title: 'Old' };
+    const fetchDataMock = vi.fn().mockResolvedValue({ photos: [] });
+    const photosMod = {
+      photoManifest: () => [stale],
+      photoManifestAt: () => Date.now() - 30 * 60 * 1000,
+      fetchData: fetchDataMock,
+    };
+    const manifest = await resolvePhotosManifest({}, { fetchJSON: vi.fn() }, photosMod);
+    expect(fetchDataMock).toHaveBeenCalled();
+    expect(manifest).toEqual([stale]); // a failed refresh does not blank the screensaver
   });
 
   it('returns [] when both photoManifest() and fetchData() are empty — allows retry without locking', async () => {

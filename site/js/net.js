@@ -23,13 +23,20 @@ export class NetError extends Error {
   }
 }
 
-async function fetchWithTimeout(url, opts = {}) {
+// The caller hands in `consume` (res.json / res.arrayBuffer / res.text) so the
+// body is read INSIDE the abort window: a server that sends 200 headers and
+// then stalls mid-stream must still hit the deadline, and it only does if the
+// abort timer is live while the body is drained. Returning the raw Response and
+// clearing the timer first left a stalled body pending forever, freezing the
+// widget's scheduled callback. The abort during a drain rejects as AbortError,
+// which the catch maps to a 'timeout' NetError like any header-stage timeout.
+async function fetchWithTimeout(url, opts = {}, consume) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? TIMEOUT_MS);
   try {
     const res = await fetch(url, { ...opts, signal: controller.signal });
     if (!res.ok) throw new NetError(`HTTP ${res.status}`, { url, status: res.status });
-    return res;
+    return await consume(res);
   } catch (err) {
     if (err instanceof NetError) throw err;
     throw new NetError(err.name === 'AbortError' ? 'timeout' : String(err), { url });
@@ -46,16 +53,16 @@ async function fetchWithTimeout(url, opts = {}) {
 export async function fetchJSON(url, opts) {
   const t0 = Date.now();
   try {
-    return await (await fetchWithTimeout(url, opts)).json();
+    return await fetchWithTimeout(url, opts, (res) => res.json());
   } finally {
     if (onWorkerFetch && String(url).startsWith(WORKER_URL)) onWorkerFetch(Date.now() - t0);
   }
 }
 
 export async function fetchBuffer(url, opts) {
-  return (await fetchWithTimeout(url, opts)).arrayBuffer();
+  return fetchWithTimeout(url, opts, (res) => res.arrayBuffer());
 }
 
 export async function fetchText(url, opts) {
-  return (await fetchWithTimeout(url, opts)).text();
+  return fetchWithTimeout(url, opts, (res) => res.text());
 }

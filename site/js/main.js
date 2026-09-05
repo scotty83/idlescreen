@@ -1,12 +1,12 @@
 // Boot and runtime orchestration for the signage dashboard.
 
 import { normalizeConfig, decodeConfig, CURATED_SOURCES } from './config.js';
-import { loadConfig, saveConfig, loadCache, saveCache, takePendingEdit, applyConfig, isDemoSession } from './store.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, cacheFingerprint, takePendingEdit, applyConfig, isDemoSession } from './store.js';
 import { fetchJSON, fetchBuffer, fetchText } from './net.js';
 import { fitViewport, narrowViewportToGlass } from './util.js';
 import { cardFor, markFresh, markStale, setCardConfigSource } from './card.js';
 import { blockZoomGestures } from './zoomguard.js';
-import { schedule } from './scheduler.js';
+import { schedule, dailyRefresh } from './scheduler.js';
 import { resolveMode, ambientSource } from './modes.js';
 import { chooseBootConfig, fragmentConfig } from './boot.js';
 import { stripData, stripHtml } from './ambient.js';
@@ -141,15 +141,24 @@ const BOOT_STAGGER_MAX_MS = 1800;
 
 function startWidget(mod, rect, startDelayMs = 0) {
   const card = cardFor(mod, rect);
-  const cached = loadCache(mod.meta.id);
+  // The fetch-input fingerprint for THIS config: a module that declares no
+  // inputs (meta.cacheInputs absent) gets null and keeps the id-only behaviour;
+  // one that does (photos, weather) only loads a cache its inputs match (F09).
+  const fp = mod.meta.cacheInputs ? cacheFingerprint(mod.meta.cacheInputs(cfg)) : null;
+  const cached = loadCache(mod.meta.id, fp);
   if (cached) {
     renderWidget(mod, cached.data);
-    markStale(card, cached.t);
+    // The payload's own source time, not the moment it was written: a Worker
+    // stale fallback must read as old as its data is (F10).
+    markStale(card, cacheAgeOf(cached));
   }
   const cancel = schedule(async () => {
     try {
       const vm = await mod.fetchData(cfg, net);
-      saveCache(mod.meta.id, vm);
+      // Persist the payload's source age so a stale digest keeps its true "as
+      // of" across a reload instead of being re-stamped to now (F10), stamped
+      // with the inputs that produced it (F09).
+      saveCache(mod.meta.id, vm, cacheStampFor(vm), fp);
       renderWidget(mod, vm);
       // A worker-served stale fallback (up to 24h old) must not read as fresh:
       // dim the card and stamp its age instead of clearing the stale mark.
@@ -159,10 +168,14 @@ function startWidget(mod, rect, startDelayMs = 0) {
       reportWidgetHealth(mod.meta.id, vm?.stale ? 'stale' : null);
     } catch (err) {
       reportWidgetHealth(mod.meta.id, 'error');
-      markStale(card, loadCache(mod.meta.id)?.t);
+      markStale(card, cacheAgeOf(loadCache(mod.meta.id, fp)));
       throw err; // let the scheduler back off
     }
-  }, mod.meta.refreshMs, { startDelayMs });
+    // Daily widgets refresh at the next local midnight (calendar), not a
+    // jittered 24h from the last fetch, so their content turns over with the
+    // date (F08). Everything else keeps the fixed-period, fractionally jittered
+    // cadence.
+  }, mod.meta.daily ? dailyRefresh() : mod.meta.refreshMs, { startDelayMs, jitter: mod.meta.daily ? 0 : 0.15 });
   cancels.push(cancel);
 }
 
@@ -172,7 +185,14 @@ function renderStrip() {
   if (!DEMO && !isAmbient()) return;
   if (cfg?.screensaver?.strip === false) return; // Screensaver page turned the band off
   const caches = {};
-  for (const id of ['weather', 'lirr', 'mnr', 'njt']) caches[id] = loadCache(id)?.data;
+  // Same fingerprint gate as startWidget: a weather cache from the old location
+  // must not feed the strip after a move (F09). Transit ids declare no inputs,
+  // so they read as before.
+  for (const id of ['weather', 'lirr', 'mnr', 'njt']) {
+    const mod = getWidget(id);
+    const fp = mod?.meta.cacheInputs ? cacheFingerprint(mod.meta.cacheInputs(cfg)) : null;
+    caches[id] = loadCache(id, fp)?.data;
+  }
   const data = DEMO && fixtures
     ? stripData(
         {

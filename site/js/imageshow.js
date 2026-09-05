@@ -268,7 +268,9 @@ let stripTimer = null;
 let viewerList = null; // photo list for the open viewer session
 let viewerCaption = true; // whether this session shows captions at all (chart: false)
 let viewerIndex = -1;
-let viewerGen = 0; // bumped per open; kept for session identity
+let viewerGen = 0; // bumped per open; session identity for a deferred swipe
+let viewerNav = 0; // bumped per navigation (swipe) and per open/close: a slow
+                   // decode from an earlier swipe must not land after a later one
 let userStepped = false; // guards against clobbering a swipe with deferred state
 
 // Put the caption box where the content says it belongs: create it only when
@@ -303,8 +305,11 @@ registerSurface('art viewer', '#art-viewer', whileShown);
 // fit is the widget's own screensaver fit (config.js imageFit): 'contain'
 // letterboxes, 'cover' fills the glass and crops.
 export function openImageViewer(current, cfg, { list = [], caption = true, strip = true, fit = 'contain' } = {}) {
-  // Reset session state synchronously.
+  // Reset session state synchronously. The nav bump supersedes any swipe from a
+  // previous session whose decode is still in flight, so it cannot paint over
+  // the album just opened.
   ++viewerGen;
+  ++viewerNav;
   userStepped = false;
   let viewer = document.querySelector('#art-viewer');
   if (!viewer) {
@@ -327,6 +332,7 @@ export function openImageViewer(current, cfg, { list = [], caption = true, strip
         viewer.hidden = true;
         clearInterval(stripTimer);
         viewerList = null; // release the album; reopen passes a fresh list
+        ++viewerNav; // a swipe still decoding when the viewer closes is void
       },
     });
     document.body.appendChild(viewer);
@@ -395,10 +401,19 @@ function step(viewer, dir) {
   viewerIndex = (viewerIndex + dir + viewerList.length) % viewerList.length;
   const item = viewerList[viewerIndex];
   const imgEl = viewer.querySelector('.art-viewer__img');
+  // Captured before the decode: a swipe toward B that loads slowly must not
+  // land after a later swipe toward C already did, and neither may paint over a
+  // viewer that has since closed or reopened onto another album. The session
+  // (viewerGen), the latest navigation (viewerNav), the viewer still being up,
+  // and imgEl still being the live image all have to hold before the swap.
+  const gen = viewerGen;
+  const nav = ++viewerNav;
   // The one swipe grammar (swipeFadeThrough): the photo dims at the gesture,
   // the src/caption swap happens in the dark, and the new photo rises. The
   // decode rides the dark beat; neighbors are pre-warmed so it rarely waits.
   swipeFadeThrough(imgEl, loadImage(new Image(), item.img), () => {
+    if (gen !== viewerGen || nav !== viewerNav || viewer.hidden) return;
+    if (viewer.querySelector('.art-viewer__img') !== imgEl) return;
     imgEl.src = item.img;
     imgEl.alt = item.title ?? '';
     renderViewerCaption(viewer, item);
@@ -417,14 +432,32 @@ function warmNeighbors() {
   }
 }
 
+// URL-independent identity for a photo across a manifest refresh: a renewed
+// signed URL is a NEW url for the SAME shot, so match on the stable fields
+// (date, title) and fall back to the url only when a source carries neither.
+const shotKey = (p) => {
+  if (!p) return '';
+  const stable = `${p.date ?? ''}|${p.title ?? ''}`;
+  return stable === '|' ? String(p.img ?? '') : stable;
+};
+
 // Ambient slideshow engine: two stacked layers, crossfade via [data-active].
-// deps.now/random are injectable for tests.
-export function createSlideshow(manifest, host, { intervalMs = 75000, random = Math.random, fit = 'contain' } = {}) {
+// deps.now/random are injectable for tests. onImageError fires when a photo
+// fails to load (an expired signed URL), so the caller can renew the manifest.
+export function createSlideshow(manifest, host, { intervalMs = 75000, random = Math.random, fit = 'contain', onImageError = null } = {}) {
   let order = shuffle([...manifest.keys()], random);
   let pos = 0;
   let timer = null;
   let active = 0;
   let stopped = false;
+  // Transition generation, bumped by advance, step and stop. Every preload
+  // captures the generation live at the gesture; only the completion whose
+  // generation is still current may show its item and schedule the next timer.
+  // Clearing `timer` at the top of step cannot cancel a timer an earlier
+  // transition has not created yet — its preload is still in flight — so two
+  // rapid swipes used to schedule two timers and race two rotation chains for
+  // the rest of the session. The generation is what a stale completion loses to.
+  let gen = 0;
 
   host.innerHTML = `
     <div class="slide" data-layer="0"></div>
@@ -475,20 +508,29 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
 
   // Decode before the crossfade starts, so the incoming layer is a finished
   // picture the moment it becomes visible (a broken URL resolves too; the
-  // background-image will retry).
+  // background-image will retry). A failed decode (`ok === false`) is usually an
+  // expired signed URL — tell the caller so it can renew the manifest before the
+  // next advance hits another dead link.
   function preload(item, done) {
-    loadImage(new Image(), item.img).then(() => done());
+    loadImage(new Image(), item.img).then((ok) => {
+      if (!ok) onImageError?.(item);
+      done(ok);
+    });
   }
 
   function advance() {
     if (stopped) return;
+    const mine = ++gen;
     const item = itemAt(pos);
     pos += 1;
     preload(item, () => {
-      // stop() during an in-flight preload must not resurrect the loop: the
-      // pending onload/onerror would otherwise schedule an uncancellable chain.
-      if (stopped) return;
+      // stop() during an in-flight preload must not resurrect the loop, and a
+      // later advance or swipe (which bumped `gen`) supersedes this one: an
+      // outdated completion that showed its item and scheduled its own timer
+      // would leave a second rotation chain running alongside the winner.
+      if (stopped || mine !== gen) return;
       show(item);
+      clearTimeout(timer);
       timer = setTimeout(() => advance(), intervalMs);
     });
   }
@@ -501,6 +543,7 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     },
     stop() {
       stopped = true;
+      gen++; // supersede any preload still in flight
       clearTimeout(timer);
     },
     // Manual navigation (ambient swipe): the whole stage fades through dark
@@ -510,6 +553,7 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     // later by a scheduled change.
     step(dir) {
       if (stopped || !manifest.length) return;
+      const mine = ++gen;
       clearTimeout(timer);
       let item;
       if (dir > 0) {
@@ -522,13 +566,30 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
       }
       const ready = new Promise((res) => preload(item, res));
       swipeFadeThrough(host, ready, () => {
-        if (stopped) return;
+        // A second swipe (or an auto advance) that started after this one owns
+        // the chain now; only the latest gesture shows and re-arms the timer.
+        if (stopped || mine !== gen) return;
         show(item, true);
+        clearTimeout(timer);
         timer = setTimeout(() => advance(), intervalMs);
       });
     },
     current() {
       return manifest[order[Math.max(pos - 1, 0)]] ?? null;
+    },
+    // Swap in a renewed manifest (fresh signed URLs) without disturbing what is
+    // on the glass: the current photo is preserved by stable identity, so the
+    // deck resumes just past it rather than jumping, and the auto advance and any
+    // in-flight transition keep running. Only the URLs the NEXT pictures load
+    // from change. A newer array is a different shuffle, which is fine for a
+    // screensaver; what matters is that later photos load from live links.
+    updateManifest(next) {
+      if (!Array.isArray(next) || !next.length) return;
+      const cur = manifest[order[Math.max(pos - 1, 0)]] ?? null;
+      manifest = next;
+      order = shuffle([...manifest.keys()], random);
+      const at = cur ? order.findIndex((i) => shotKey(manifest[i]) === shotKey(cur)) : -1;
+      pos = at >= 0 ? at + 1 : 0;
     },
   };
 }

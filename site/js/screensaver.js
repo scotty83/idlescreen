@@ -51,6 +51,18 @@ let source = null; // the ambient source in force, for step() and the minute re-
 let slideshow = null;
 let clockface = null; // minute-tick clock screensaver engine (clockfaces.js)
 let slideshowStarting = false; // guards the await gap in startSlideshow
+// Slideshow lifecycle generation, bumped whenever the board leaves ambient or
+// the ambient source changes. startSlideshow captures it before awaiting the
+// manifest; a resolution whose generation is stale must not build an engine
+// behind the dashboard or install a source the board has since moved off.
+let slideshowGen = 0;
+// Signed-URL sources (iCloud, Google Drive) hand out links that expire after a
+// few hours; the other sources (art, curated folders) carry stable URLs. Only
+// the signed ones need their manifest renewed while a screensaver runs for hours.
+const SIGNED_SOURCES = new Set(['photos', 'gdrivephotos']);
+const MANIFEST_TTL_MS = 20 * 60 * 1000; // renew a signed manifest about this often
+let manifestAt = 0; // when the running slideshow's manifest was last resolved
+let manifestRefreshing = false; // guards the await gap in refreshManifest
 let backdropGen = 0; // guards the await gap in applyBackdrop (mode can flip mid-fetch)
 let backdropList = []; // full curated backdrop set, for swipe-to-next
 let backdropIndex = 0; // which backdrop is showing (starts at the daily pick)
@@ -101,8 +113,12 @@ export function isAmbient() {
 // album that came back empty is retried). Every step below is therefore either
 // a no-op when nothing changed or guarded against running twice.
 export function setMode(mode, cfg) {
+  const prevSource = source;
   source = ambientSource(cfg);
   ambient = mode === 'ambient' && source !== null;
+  // A source swap invalidates any slideshow still starting for the old one; the
+  // leave() below covers dropping out of ambient entirely.
+  if (source !== prevSource) slideshowGen++;
   document.body.classList.toggle('mode-ambient', ambient);
   // Clock faces reserve extra bottom space when the info strip is showing, so a
   // wrapped (two-row) world-clock grid centers above the strip instead of
@@ -135,6 +151,7 @@ function enter(cfg) {
 // reload, and the backdrop's generation bump abandons any folder fetch still in
 // flight so it cannot paint over the dashboard when it lands.
 function leave() {
+  slideshowGen++; // a manifest still resolving must not start a slideshow now
   if (slideshow) { slideshow.stop(); slideshow = null; }
   if (clockface) { clockface.stop(); clockface = null; }
   applyBackdrop(false);
@@ -145,11 +162,20 @@ async function startSlideshow(cfg) {
   // simultaneous calls (setMode runs once directly + once from schedule's
   // immediate first tick) would both pass a `slideshow`-only guard and spawn a
   // second, un-stoppable engine. The synchronous in-flight flag closes that gap.
-  if (slideshow || slideshowStarting) return;
+  // Already running: the per-minute setMode re-entry is the cadence a signed
+  // manifest renews on, so a screensaver up for hours keeps live URLs instead of
+  // freezing on expired ones until the nightly reload.
+  if (slideshow) { refreshManifest(); return; }
+  if (slideshowStarting) return;
   slideshowStarting = true;
   try {
     const src = source;
+    const bornGen = slideshowGen;
     const manifest = await photosFor(src);
+    // The await is a gap the schedule can drive through: the board may have gone
+    // to the dashboard, or switched sources, while the album was fetching. Only
+    // build the engine if the world it was started for is still the one in force.
+    if (!ambient || source !== src || slideshowGen !== bornGen) return;
     if (!manifest?.length) return; // don't lock an empty slideshow; retry next setMode
     // Each ambient source owns its interval: the chosen photo widget's every for
     // its slideshow, the curated source's user rotation (its own default), art's
@@ -161,10 +187,38 @@ async function startSlideshow(cfg) {
     // Curated photo sources (Landscapes) fill the screen; art/personal photos
     // letterbox to never crop the canvas. Same rule the tapped-open viewer asks.
     const fit = imageFit(src);
-    slideshow = createSlideshow(manifest, $('#slideshow'), { intervalMs: everyMin * 60 * 1000, fit });
+    slideshow = createSlideshow(manifest, $('#slideshow'), {
+      intervalMs: everyMin * 60 * 1000, fit,
+      // A dead photo (expired signed link) renews the whole manifest at once,
+      // rather than waiting out the 20-minute cadence with more dead links.
+      onImageError: () => refreshManifest({ force: true }),
+    });
     slideshow.start();
+    manifestAt = Date.now();
   } catch (err) { console.error('[signage] slideshow unavailable', err); }
   finally { slideshowStarting = false; }
+}
+
+// Renew the running slideshow's manifest with fresh signed URLs. Signed sources
+// only (art/curated links do not expire); bounded to MANIFEST_TTL_MS unless an
+// image failure forces it. The same lifecycle-generation and source rechecks as
+// startSlideshow guard the await gap, so a refresh that lands after the board
+// left ambient or switched sources is dropped.
+async function refreshManifest({ force = false } = {}) {
+  if (!slideshow || !SIGNED_SOURCES.has(source) || manifestRefreshing) return;
+  if (!force && Date.now() - manifestAt < MANIFEST_TTL_MS) return;
+  manifestRefreshing = true;
+  const src = source;
+  const bornGen = slideshowGen;
+  try {
+    const next = await photosFor(src);
+    if (!slideshow || source !== src || slideshowGen !== bornGen) return;
+    if (next?.length) {
+      slideshow.updateManifest(next);
+      manifestAt = Date.now();
+    }
+  } catch (err) { console.error('[signage] manifest refresh failed', err); }
+  finally { manifestRefreshing = false; }
 }
 
 // CSS url() escaping for externally-sourced image URLs: quotes and backslashes

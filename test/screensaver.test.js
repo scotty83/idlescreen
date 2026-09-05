@@ -23,6 +23,10 @@ const BACKDROPS = [1, 2, 3, 4, 5].map((n) => ({ img: `https://x.test/b${n}.jpg`,
 
 const ART = { screensaver: { source: 'art', strip: true }, art: { every: 30 } };
 const CLOCK = { screensaver: { source: 'clock', strip: true, backdrop: true } };
+// Two distinct photo sources, for the lifecycle-generation guard: switching
+// between them changes the ambient source while a manifest may be in flight.
+const PHOTOS_CFG = { screensaver: { source: 'photos', strip: true }, photos: { album: 'A', every: 30 } };
+const GDRIVE_CFG = { screensaver: { source: 'gdrivephotos', strip: true }, gdrivephotos: { album: 'B', every: 30 } };
 
 // index.html's ambient nodes, which the engine addresses by id.
 function mountBoard() {
@@ -147,6 +151,46 @@ describe('the slideshow', () => {
     expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(2);
   });
 
+  it('a manifest that resolves after the board left ambient never starts a hidden slideshow', async () => {
+    // A slow album fetch begins just before the schedule flips to dashboard; its
+    // late response must not spin an engine and a rotation timer behind the grid.
+    const gate = deferred();
+    initScreensaver({
+      photos: async () => { await gate.promise; return PHOTOS; },
+      backdrops: async () => [],
+    });
+
+    setMode('ambient', ART);
+    await flush();
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0); // still fetching
+
+    setMode('dashboard', ART); // the schedule window opened while the album was in flight
+    gate.resolve();
+    await flush();
+    expect(isAmbient()).toBe(false);
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0); // nothing spun up behind the grid
+  });
+
+  it('a manifest for a source the board has since left does not install that source', async () => {
+    const gate = deferred();
+    const served = [];
+    initScreensaver({
+      photos: async (src) => { served.push(src); await gate.promise; return PHOTOS; },
+      backdrops: async () => [],
+    });
+
+    setMode('ambient', PHOTOS_CFG); // starts fetching the iCloud album
+    await flush();
+    expect(served).toEqual(['photos']);
+
+    setMode('ambient', GDRIVE_CFG); // source switched to Drive while the fetch was in flight
+    gate.resolve();
+    await flush();
+    // The iCloud manifest resolves now, but the board is on gdrivephotos: the
+    // obsolete source must not be installed behind the current one.
+    expect($('#slideshow').querySelectorAll('.slide')).toHaveLength(0);
+  });
+
   it('stops the slideshow on the way out', async () => {
     initScreensaver({ photos: async () => PHOTOS, backdrops: async () => [] });
     setMode('ambient', ART);
@@ -156,6 +200,76 @@ describe('the slideshow', () => {
     setMode('dashboard', ART);
     await vi.advanceTimersByTimeAsync(31 * 60 * 1000); // well past the 30-minute rotation
     expect(bgOf($('#slideshow .slide[data-active]'))).toBe(shown); // nothing advanced behind the grid
+  });
+});
+
+describe('a long-running photo screensaver renews its signed URLs', () => {
+  // iCloud/Drive URLs expire after hours; a slideshow that keeps its original
+  // array shows dead links until the nightly reload. The engine must receive
+  // renewed manifests on a bounded cadence and after an image failure (F11).
+  const v1 = [
+    { img: 'https://x.test/p1-v1.jpg', title: 'One', date: 'd1' },
+    { img: 'https://x.test/p2-v1.jpg', title: 'Two', date: 'd2' },
+  ];
+  const v2 = v1.map((p) => ({ ...p, img: p.img.replace('-v1', '-v2') }));
+
+  it('re-resolves the manifest on the ~20-minute cadence, not before', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    let call = 0;
+    initScreensaver({ photos: async () => (call++ === 0 ? v1 : v2), backdrops: async () => [] });
+
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(1);
+    expect(bgOf($('#slideshow .slide[data-active]'))).toContain('-v1');
+
+    // A re-entry inside the TTL does not re-resolve.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(1);
+
+    // Past the 20-minute TTL, the next re-entry renews it.
+    await vi.advanceTimersByTimeAsync(11 * 60 * 1000); // now 21 min in
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    expect(call).toBe(2);
+
+    // The renewed URLs reach the glass on the next auto advance (30-min every).
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    await flush();
+    expect(bgOf($('#slideshow .slide[data-active]'))).toContain('-v2');
+  });
+
+  it('renews at once when a photo fails to load, without waiting for the TTL', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    // v1 links are dead (expired); v2 links load.
+    vi.stubGlobal('Image', class {
+      set src(v) { queueMicrotask(() => (String(v).includes('-v1') ? this.onerror?.() : this.onload?.())); }
+    });
+    let call = 0;
+    initScreensaver({ photos: async () => (call++ === 0 ? v1 : v2), backdrops: async () => [] });
+
+    setMode('ambient', PHOTOS_CFG);
+    await flush();
+    await flush(); // the dead first photo fires onImageError → a forced refresh
+    await flush();
+    expect(call).toBe(2);
+  });
+
+  it('leaves art/curated manifests alone — their URLs do not expire', async () => {
+    vi.setSystemTime(new Date(2026, 7, 11, 22, 0));
+    let call = 0;
+    initScreensaver({ photos: async () => { call++; return PHOTOS; }, backdrops: async () => [] });
+
+    setMode('ambient', ART); // art source: stable URLs
+    await flush();
+    expect(call).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(25 * 60 * 1000); // well past the TTL
+    setMode('ambient', ART);
+    await flush();
+    expect(call).toBe(1); // no needless refetch for a non-signed source
   });
 });
 

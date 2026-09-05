@@ -1,6 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { parseAlbumToken } from '../site/js/util.js';
-import { mapPhotos } from '../site/js/widgets/photos.js';
+import { mapPhotos, meta } from '../site/js/widgets/photos.js';
+
+// F09: the photos cache fingerprint keys on the album, not the rotation cadence,
+// so a swapped album is a cache miss but a change to `every` (presentation) is not.
+describe('photos cache fingerprint inputs', () => {
+  it('keys on the album, excluding the rotation cadence', () => {
+    expect(meta.cacheInputs({ photos: { album: 'A', every: 30 } })).toEqual({ album: 'A' });
+    expect(meta.cacheInputs({ photos: { album: 'A', every: 5 } })).toEqual({ album: 'A' });
+    expect(meta.cacheInputs({ photos: { album: 'B', every: 30 } })).toEqual({ album: 'B' });
+    expect(meta.cacheInputs({})).toEqual({ album: '' });
+  });
+});
 
 describe('parseAlbumToken', () => {
   it('extracts the token from a full URL, a #fragment, or a bare token', () => {

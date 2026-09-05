@@ -4,7 +4,9 @@
 import { escapeHtml, dailyPick } from '../util.js';
 import { cardSize, sizeTier } from '../capacity.js';
 
-export const meta = { id: 'wotd', title: 'Word of the Day', refreshMs: 24 * 60 * 60 * 1000 };
+// `daily`: refresh at the next local midnight so the word turns over with the
+// date, not 24h after the last fetch (see scheduler.dailyRefresh).
+export const meta = { id: 'wotd', title: 'Word of the Day', refreshMs: 24 * 60 * 60 * 1000, daily: true };
 
 export function render(el, vm, _cfg) {
   const [w, h] = cardSize(el, [3, 3]);

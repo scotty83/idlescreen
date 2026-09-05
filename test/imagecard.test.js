@@ -567,3 +567,80 @@ describe('an image card is one tap target, not a figure inside a card', () => {
     viewer.remove();
   });
 });
+
+// F12: a swipe's decode can finish long after a later swipe already landed. The
+// viewer keeps a navigation generation so only the newest navigation of the
+// CURRENT session may touch the image, and a slow loser stays a no-op.
+describe('the photo viewer: a late swipe cannot overwrite a newer one', () => {
+  const swipe = (viewer, dir) => {
+    const [down, up] = dir > 0 ? [300, 100] : [100, 300]; // left drag = next
+    viewer.dispatchEvent(new PointerEvent('pointerdown', { clientX: down, bubbles: true }));
+    viewer.dispatchEvent(new PointerEvent('pointerup', { clientX: up, bubbles: true }));
+  };
+  // Resolve the FIRST pending decode whose image src carries `match`. loadImage
+  // sets .src before calling decode(), so the pending entry already knows which
+  // photo it is waiting on.
+  const resolveDecode = (match) => {
+    const i = pending.findIndex((d) => String(d.img.src ?? '').includes(match));
+    if (i < 0) throw new Error(`no pending decode for ${match}`);
+    pending.splice(i, 1)[0].resolve();
+  };
+
+  it('B loading slowly after C already landed leaves C on the glass', async () => {
+    vi.useFakeTimers();
+    document.querySelector('#art-viewer')?.remove();
+    const list = [
+      { img: 'https://x.test/v1.jpg', title: 'One' },
+      { img: 'https://x.test/v2.jpg', title: 'Two' },
+      { img: 'https://x.test/v3.jpg', title: 'Three' },
+    ];
+    openImageViewer(list[0], CFG, { list });
+    const viewer = document.querySelector('#art-viewer');
+    const img = viewer.querySelector('.art-viewer__img');
+
+    pending = []; // drop the neighbors warmed at open; the swipes are what matter
+    swipe(viewer, 1); // toward v2 (will load slowly)
+    swipe(viewer, 1); // toward v3 (lands first)
+
+    resolveDecode('v3.jpg');
+    await vi.advanceTimersByTimeAsync(SWIPE_OUT_MS + 50); // v3 rises through the dark
+    expect(img.getAttribute('src')).toBe('https://x.test/v3.jpg');
+
+    resolveDecode('v2.jpg'); // the slow, superseded swipe finally decodes
+    await vi.advanceTimersByTimeAsync(0);
+    expect(img.getAttribute('src')).toBe('https://x.test/v3.jpg'); // not clobbered
+
+    document.querySelector('#art-viewer')?.remove();
+    vi.useRealTimers();
+  });
+
+  it('a swipe still decoding when the viewer reopens cannot caption the new album', async () => {
+    // Reopen rebuilds the <img>, so an orphaned swipe's src write lands on a
+    // detached element harmlessly — but its CAPTION write targets the live
+    // viewer, which is exactly where the old album used to leak into the new
+    // session before the generation check.
+    vi.useFakeTimers();
+    document.querySelector('#art-viewer')?.remove();
+    const first = [
+      { img: 'https://x.test/a1.jpg', title: 'A1' },
+      { img: 'https://x.test/a2.jpg', title: 'Album A photo two' },
+    ];
+    openImageViewer(first[0], CFG, { list: first });
+    const viewer = document.querySelector('#art-viewer');
+    const captionText = () => viewer.querySelector('.slide-caption__title')?.textContent ?? '';
+
+    pending = [];
+    swipe(viewer, 1); // toward a2, whose decode never resolves before we reopen
+
+    const second = [{ img: 'https://x.test/b1.jpg', title: 'Album B photo one' }];
+    openImageViewer(second[0], CFG, { list: second });
+    expect(captionText()).toBe('Album B photo one');
+
+    resolveDecode('a2.jpg'); // the orphaned swipe from the old session decodes now
+    await vi.advanceTimersByTimeAsync(SWIPE_OUT_MS + 50);
+    expect(captionText()).toBe('Album B photo one'); // the old album's caption never leaks in
+
+    document.querySelector('#art-viewer')?.remove();
+    vi.useRealTimers();
+  });
+});

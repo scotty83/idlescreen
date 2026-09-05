@@ -84,22 +84,66 @@ export async function applyConfig(cfg, { reload = () => window.location.reload()
   return applied;
 }
 
-export function saveCache(id, data, t = Math.floor(Date.now() / 1000)) {
+// Order-independent stringify: two configs that differ only in key order share a
+// fingerprint, so a cosmetic reshuffle never invalidates a cache.
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+}
+
+// A widget cache is addressed by widget id, but a widget's payload is only valid
+// for the fetch inputs that produced it: a photo album's id, a weather location.
+// A module hands its fetch-relevant config subset (meta.cacheInputs) here to
+// stamp the cache, and passes the same subset when reading; presentation-only
+// settings (a rotation interval, a unit) must be left OUT, since they change
+// what the payload LOOKS like, not what it IS. Null (a module with no inputs to
+// declare) means "no fingerprint" — today's id-only behaviour.
+export function cacheFingerprint(inputs) {
+  return inputs == null ? null : stableStringify(inputs);
+}
+
+export function saveCache(id, data, t = Math.floor(Date.now() / 1000), fp = null) {
+  // Omit fp when absent so id-only caches keep their exact stored shape.
+  const entry = fp == null ? { t, data } : { t, data, fp };
   try {
-    storage().setItem(CACHE_PREFIX + id, JSON.stringify({ t, data }));
+    storage().setItem(CACHE_PREFIX + id, JSON.stringify(entry));
   } catch {
     // Storage full or unavailable — cache is best-effort.
   }
 }
 
-export function loadCache(id) {
+export function loadCache(id, expectedFp = null) {
   try {
     const raw = storage().getItem(CACHE_PREFIX + id);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const entry = JSON.parse(raw);
+    // A fingerprint mismatch means the stored payload was fetched for a
+    // different source than the one the caller is now configured for (a swapped
+    // album, a moved location). Treat it as a miss so the old source's data
+    // cannot paint under the new config while the new fetch is still failing.
+    if (expectedFp != null && entry?.fp !== expectedFp) return null;
+    return entry;
   } catch {
     return null; // storage unavailable — best-effort, mirroring saveCache
   }
+}
+
+// The timestamp a payload should be STORED under. A Worker stale fallback (up to
+// 24h old) carries the age of the DATA in its digest envelope (updatedAt, epoch
+// seconds); stamping such a payload with the wall clock instead resets its
+// displayed age to "now" on every save, so a noon reload of an 8 AM digest would
+// claim "as of 12 PM". A fresh payload carries no updatedAt and falls back to now.
+export function cacheStampFor(data) {
+  return Number.isFinite(data?.updatedAt) ? data.updatedAt : Math.floor(Date.now() / 1000);
+}
+
+// The timestamp a cached entry should DISPLAY as its "as of": the payload's own
+// source time when it has one (which also corrects caches written by an older
+// build before cacheStampFor existed), else the moment it was written. Epoch
+// seconds, the unit markStale reads.
+export function cacheAgeOf(cached) {
+  return cached?.data?.updatedAt ?? cached?.t ?? null;
 }
 
 /* ---------- pending edit-mode handoff ---------- */

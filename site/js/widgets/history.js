@@ -6,7 +6,10 @@ import { setMoreBadge } from '../card.js';
 import { fitList } from '../capacity.js';
 import { setExpandSource } from '../expand.js';
 
-export const meta = { id: 'history', title: 'This Day in History', refreshMs: 24 * 60 * 60 * 1000 };
+// `daily` schedules the refresh against the local calendar (next midnight), not
+// 24h from the last fetch, so a board left on across midnight rolls to the new
+// day's events instead of the nightly reload being the only thing that does.
+export const meta = { id: 'history', title: 'This Day in History', refreshMs: 24 * 60 * 60 * 1000, daily: true };
 
 export function render(el, vm, _cfg) {
   if (!vm.events?.length) {
@@ -35,7 +38,10 @@ export function render(el, vm, _cfg) {
   // owes a tap the bigger reading view. Only the badge tracks `hidden`.
   setExpandSource(el, () => ({
     title: meta.title,
-    note: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+    // The date the events are FOR (stamped by fetchData), not the day the tap
+    // happens: across midnight without a refetch the rows still describe
+    // yesterday, and labelling them with today's date is the mismatch this fixes.
+    note: new Date(vm.date ?? Date.now()).toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
     bodyHtml: `<div class="history history-board">${rows.join('')}</div>`,
   }));
 }
@@ -70,5 +76,7 @@ export async function fetchData(cfg, net) {
   const json = await net.fetchJSON(
     `https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/${mm}/${dd}`,
   );
-  return mapHistory(json);
+  // Stamp the local date the events are for, so the expanded view labels them by
+  // THAT day even when the card is tapped after midnight (before the next fetch).
+  return { ...mapHistory(json), date: now.getTime() };
 }

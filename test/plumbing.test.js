@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { loadConfig, saveConfig, loadCache, saveCache } from '../site/js/store.js';
-import { schedule } from '../site/js/scheduler.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, cacheFingerprint } from '../site/js/store.js';
+import { schedule, msUntilNextLocalMidnight, dailyRefresh } from '../site/js/scheduler.js';
 import { resolveMode, stepTime, fmtHM } from '../site/js/modes.js';
 import { normalizeConfig, encodeConfig } from '../site/js/config.js';
 
@@ -36,6 +36,77 @@ describe('store', () => {
     saveCache('weather', { now: { temp: 80 } }, 1234);
     expect(loadCache('weather')).toEqual({ t: 1234, data: { now: { temp: 80 } } });
     expect(loadCache('missing')).toBeNull();
+  });
+});
+
+// F10: a Worker stale fallback carries its data's own age (updatedAt); storing
+// it under the wall clock, and reading the storage time back, resets the
+// displayed "as of" to now on every reload.
+describe('cache freshness stamps', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('stamps a stale payload with its own source time, not the wall clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T12:00:00Z')); // "now" = noon
+    const eightAm = Math.floor(new Date('2026-09-04T08:00:00Z').getTime() / 1000);
+    expect(cacheStampFor({ stale: true, updatedAt: eightAm })).toBe(eightAm);
+  });
+
+  it('falls back to now for a fresh payload with no source time', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T12:00:00Z'));
+    const now = Math.floor(Date.now() / 1000);
+    expect(cacheStampFor({ temp: 80 })).toBe(now);
+    expect(cacheStampFor(undefined)).toBe(now);
+    expect(cacheStampFor({ updatedAt: NaN })).toBe(now);
+  });
+
+  it('prefers a payload updatedAt over the write time when showing age', () => {
+    const eightAm = 1_757_318_400; // some epoch seconds
+    // Written at noon, but the digest is from 8 AM: 8 AM is the age to show.
+    expect(cacheAgeOf({ t: eightAm + 4 * 3600, data: { updatedAt: eightAm } })).toBe(eightAm);
+    // No source time: the write time is all we have.
+    expect(cacheAgeOf({ t: 500, data: { temp: 80 } })).toBe(500);
+    expect(cacheAgeOf({ t: 500, data: null })).toBe(500);
+    expect(cacheAgeOf(null)).toBeNull();
+  });
+
+  it('round-trips a stale payload so a reload keeps its true age', () => {
+    const eightAm = 1_757_318_400;
+    const vm = { stale: true, updatedAt: eightAm, temp: 72 };
+    saveCache('weather', vm, cacheStampFor(vm));
+    expect(cacheAgeOf(loadCache('weather'))).toBe(eightAm);
+  });
+});
+
+// F09: a widget cache addressed only by id is rendered under any new config;
+// stamping the fetch inputs and reading with the same subset makes a changed
+// source (a swapped album, a moved location) a cache miss, not a wrong render.
+describe('cache fingerprint gating', () => {
+  it('a cache stamped for one input set is a miss for another', () => {
+    const fpA = cacheFingerprint({ album: 'A' });
+    const fpB = cacheFingerprint({ album: 'B' });
+    saveCache('photos', { photos: ['a'] }, 1, fpA);
+    expect(loadCache('photos', fpA)?.data).toEqual({ photos: ['a'] }); // same inputs → hit
+    expect(loadCache('photos', fpB)).toBeNull();                        // changed album → miss
+  });
+
+  it('leaves id-only readers and non-fingerprinted caches exactly as they were', () => {
+    saveCache('lirr', { departures: [] }, 5); // a module with no declared inputs
+    expect(loadCache('lirr')).toEqual({ t: 5, data: { departures: [] } }); // stored shape unchanged
+    // A fingerprinted cache is still visible to an id-only read (opt-in gating).
+    saveCache('photos', { photos: ['a'] }, 1, cacheFingerprint({ album: 'A' }));
+    expect(loadCache('photos')?.data).toEqual({ photos: ['a'] });
+  });
+
+  it('rejects a legacy cache written before fingerprints existed', () => {
+    saveCache('photos', { photos: ['a'] }, 1); // pre-fix cache: no fp stored
+    expect(loadCache('photos', cacheFingerprint({ album: 'A' }))).toBeNull();
+  });
+
+  it('is order-independent, so a cosmetic key reshuffle is not a new source', () => {
+    expect(cacheFingerprint({ lat: 1, lon: 2 })).toBe(cacheFingerprint({ lon: 2, lat: 1 }));
+    expect(cacheFingerprint(null)).toBeNull();
   });
 });
 
@@ -135,6 +206,58 @@ describe('scheduler', () => {
     for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(8000);
     cancel();
     expect(Math.max(...delays)).toBe(8000);
+  });
+
+  // F08: a function interval lets a daily widget schedule against the local
+  // calendar instead of a fixed period; it is recomputed after each run.
+  it('accepts a function interval, recomputed after each run', async () => {
+    const fn = vi.fn().mockResolvedValue(undefined);
+    const delays = [3000, 7000];
+    let i = 0;
+    const cancel = schedule(fn, () => delays[Math.min(i++, delays.length - 1)], { jitter: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fn).toHaveBeenCalledTimes(1); // immediate first run
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fn).toHaveBeenCalledTimes(2); // used the first computed delay
+    await vi.advanceTimersByTimeAsync(6999);
+    expect(fn).toHaveBeenCalledTimes(2); // and the second, not before it elapses
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(3);
+    cancel();
+  });
+});
+
+// F08: daily widgets turn over with the local DATE, not 24h after the last
+// fetch. A jittered 24h interval drifts off the date boundary; a calendar
+// schedule lands on it.
+describe('daily calendar scheduling', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('measures the time to the next LOCAL midnight', () => {
+    expect(msUntilNextLocalMidnight(new Date(2026, 8, 4, 22, 30))).toBe(90 * 60 * 1000);
+    // At midnight, a full day to the NEXT one — never a zero-delay hot loop.
+    expect(msUntilNextLocalMidnight(new Date(2026, 8, 4, 0, 0))).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('dailyRefresh waits for midnight on success, retries soon on failure', () => {
+    const at2230 = new Date(2026, 8, 4, 22, 30).getTime();
+    const next = dailyRefresh({ retryMs: 5 * 60 * 1000, jitterMs: 0, now: () => at2230 });
+    expect(next({ failed: false })).toBe(90 * 60 * 1000);        // to the date boundary
+    expect(next({ failed: true })).toBe(5 * 60 * 1000);          // not a whole day later
+  });
+
+  it('drives a schedule across the local date boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 4, 23, 59)); // one minute to midnight
+    const fn = vi.fn().mockResolvedValue(undefined);
+    const cancel = schedule(fn, dailyRefresh({ jitterMs: 0 }), { jitter: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fn).toHaveBeenCalledTimes(1); // fetch now
+    await vi.advanceTimersByTimeAsync(60 * 1000 - 1);
+    expect(fn).toHaveBeenCalledTimes(1); // nothing before midnight
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(2); // refreshes AT the boundary
+    cancel();
   });
 });
 

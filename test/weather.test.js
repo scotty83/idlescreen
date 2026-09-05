@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import {
-  mapWeather, wmoInfo, inUS, fetchData, trendSvg,
+  meta, mapWeather, wmoInfo, inUS, fetchData, trendSvg,
   hourLabel, timeLabel, compass, fmtWind, fmtAmount, meteoBoard, meteoCanvas,
 } from '../site/js/widgets/weather.js';
 import { mapAqi, moonPhase } from '../site/js/widgets/aqi.js';
@@ -9,6 +9,21 @@ import { DEMO_VMS } from '../site/demo/fixtures.js';
 
 const fixture = async (name) =>
   JSON.parse(await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+
+// F09: the weather cache fingerprint keys on location alone. A move is a new
+// source (refetch), a unit or label change is presentation (re-render).
+describe('weather cache fingerprint inputs', () => {
+  const nyc = { loc: { lat: 40.71, lon: -73.99, units: 'F', label: 'New York' } };
+  it('keys on lat/lon only, excluding units and label', () => {
+    expect(meta.cacheInputs(nyc)).toEqual({ lat: 40.71, lon: -73.99 });
+    const unitsChanged = { loc: { ...nyc.loc, units: 'C', label: 'NYC métrique' } };
+    expect(meta.cacheInputs(unitsChanged)).toEqual({ lat: 40.71, lon: -73.99 });
+  });
+  it('changes when the board moves', () => {
+    const chicago = { loc: { lat: 41.88, lon: -87.63, units: 'F', label: 'Chicago' } };
+    expect(meta.cacheInputs(chicago)).toEqual({ lat: 41.88, lon: -87.63 });
+  });
+});
 
 describe('mapWeather', () => {
   it('maps the open-meteo fixture', async () => {
