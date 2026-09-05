@@ -1746,22 +1746,35 @@ describe('service status adapters', () => {
 
   it('google: all-ended fixture is ok, active incident is minor', () => {
     expect(mapGoogle(googleFx, Date.now()).state).toBe('ok');
+    expect(mapGoogle([], Date.now()).state).toBe('ok'); // a genuinely empty array is all-clear
     const out = mapGoogle([{ begin: '2026-07-11T00:00:00Z', external_desc: '**Gmail delays**\ndetail here' }], Date.now());
     expect(out.state).toBe('minor');
     expect(out.note).toBe('Gmail delays');
   });
   it('webex: maintenance-only fixture is ok, real incident degrades', () => {
     expect(mapWebex(webexFx).state).toBe('ok'); // 3 unresolved, all maintenance
+    expect(mapWebex({ unResolvedIncidents: [] }).state).toBe('ok'); // no open incidents is all-clear
     const out = mapWebex({ unResolvedIncidents: [{ incidentName: 'Meetings join failures', impact: 'major', createTime: 'x' }] });
     expect(out.state).toBe('major');
     expect(out.note).toBe('Meetings join failures');
   });
   it('aws: stale events are ok now, recent event degrades', () => {
     expect(mapAws(awsFx, Date.now()).state).toBe('ok'); // events months old
+    expect(mapAws([], Date.now()).state).toBe('ok'); // empty array is all-clear
     const evDate = Number(awsFx[0].date) * 1000;
     const out = mapAws(awsFx, evDate + 3600e3); // one hour after the event
     expect(out.state).toBe('minor');
     expect(out.note).toContain('Increased Error Rates');
+  });
+  it('malformed envelope is NEVER green: the three array feeds throw on a non-array body', () => {
+    // A provider that answers 200 with an error object or a changed JSON shape
+    // used to coerce to [] and report "All systems operational". Each mapper now
+    // throws instead, which fetchOne turns into an unknown row (partial digest,
+    // cached() serves the stale backup) rather than a fabricated green.
+    expect(() => mapGoogle({}, Date.now())).toThrow(/expected an incidents array/);
+    expect(() => mapAws({}, Date.now())).toThrow(/expected an events array/);
+    expect(() => mapWebex({})).toThrow(/expected an unResolvedIncidents array/);
+    expect(() => mapWebex({ unResolvedIncidents: 'nope' })).toThrow(/expected an unResolvedIncidents array/);
   });
 });
 

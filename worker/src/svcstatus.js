@@ -344,7 +344,13 @@ export function mapM365(consumerJson, mirrorJson, nowMs, graphJson = null) {
 }
 
 export function mapGoogle(json, nowMs) {
-  const active = (Array.isArray(json) ? json : []).filter((i) => !i.end || Date.parse(i.end) > nowMs);
+  // A non-array envelope is a schema break (an error object, a 200-with-HTML, a
+  // changed API), NOT "no incidents". Coercing it to [] used to report green;
+  // throwing makes fetchOne report the row unknown and the digest partial, so
+  // cached() serves stale instead of fabricating "all operational". A genuine
+  // empty array is really all-clear and still passes through as healthy.
+  if (!Array.isArray(json)) throw new Error('google: expected an incidents array');
+  const active = json.filter((i) => !i.end || Date.parse(i.end) > nowMs);
   if (!active.length) return { state: 'ok', note: 'All systems operational', incidents: [] };
   return {
     state: 'minor',
@@ -361,7 +367,11 @@ export function mapWebex(json) {
   // permanent yellow would make the signal worthless, so maintenance is not
   // "degraded" here (fixture: 3 open entries, all maintenance → ok).
   const isMaint = (i) => /maintenance/i.test(String(i.impact ?? '')) || /maintenance/i.test(String(i.incidentType ?? ''));
-  const open = (json?.unResolvedIncidents ?? []).filter((i) => !i.deleted && !isMaint(i));
+  // The feed always carries unResolvedIncidents as an array (empty when calm).
+  // A missing or non-array field is a broken envelope, not "no open incidents":
+  // throw so the row reports unknown rather than fake green (see mapGoogle).
+  if (!Array.isArray(json?.unResolvedIncidents)) throw new Error('webex: expected an unResolvedIncidents array');
+  const open = json.unResolvedIncidents.filter((i) => !i.deleted && !isMaint(i));
   if (!open.length) return { state: 'ok', note: 'All systems operational', incidents: [] };
   return {
     state: open.some((i) => /major|critical|outage/i.test(String(i.impact ?? ''))) ? 'major' : 'minor',
@@ -376,7 +386,10 @@ export function mapAws(json, nowMs) {
   // data.json mixes resolved history into the same array (fixture events are
   // months old) — only an event from the last six hours counts as active.
   const RECENT_MS = 6 * 3600e3;
-  const events = (Array.isArray(json) ? json : []).filter((e) => nowMs - Number(e.date) * 1000 < RECENT_MS);
+  // Same rule as mapGoogle: a non-array body is a broken envelope, not an empty
+  // one — throw so the row reports unknown rather than green.
+  if (!Array.isArray(json)) throw new Error('aws: expected an events array');
+  const events = json.filter((e) => nowMs - Number(e.date) * 1000 < RECENT_MS);
   if (!events.length) return { state: 'ok', note: 'All systems operational', incidents: [] };
   return {
     state: 'minor',
