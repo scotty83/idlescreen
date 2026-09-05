@@ -33,7 +33,13 @@ export function createPhotoWidget({ id, cfgKey, endpoint, emptyAction, emptyDest
   // cfg[cfgKey].every bucket flips (the worker caches the album digest, so the
   // frequent fetch is an edge-cache hit and re-setting the same <img> URL is a
   // browser-cache hit).
-  const meta = { id, title: curated?.title ?? 'Photos', refreshMs: 60 * 1000 };
+  const meta = {
+    id, title: curated?.title ?? 'Photos', refreshMs: 60 * 1000,
+    // The album (or a curated widget's fixed folder) is the ONE fetch input;
+    // `every` is presentation (the rotation cadence) and stays out. This is what
+    // keeps a cache from album A from painting under album B (store.js F09).
+    cacheInputs: (cfg) => ({ album: curated ? curated.folder : (cfg?.[cfgKey]?.album ?? '') }),
+  };
 
   function render(el, vm, cfg) {
     sessionList = vm.photos ?? [];

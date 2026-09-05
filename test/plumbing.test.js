@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf } from '../site/js/store.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, cacheFingerprint } from '../site/js/store.js';
 import { schedule } from '../site/js/scheduler.js';
 import { resolveMode, stepTime, fmtHM } from '../site/js/modes.js';
 import { normalizeConfig, encodeConfig } from '../site/js/config.js';
@@ -76,6 +76,37 @@ describe('cache freshness stamps', () => {
     const vm = { stale: true, updatedAt: eightAm, temp: 72 };
     saveCache('weather', vm, cacheStampFor(vm));
     expect(cacheAgeOf(loadCache('weather'))).toBe(eightAm);
+  });
+});
+
+// F09: a widget cache addressed only by id is rendered under any new config;
+// stamping the fetch inputs and reading with the same subset makes a changed
+// source (a swapped album, a moved location) a cache miss, not a wrong render.
+describe('cache fingerprint gating', () => {
+  it('a cache stamped for one input set is a miss for another', () => {
+    const fpA = cacheFingerprint({ album: 'A' });
+    const fpB = cacheFingerprint({ album: 'B' });
+    saveCache('photos', { photos: ['a'] }, 1, fpA);
+    expect(loadCache('photos', fpA)?.data).toEqual({ photos: ['a'] }); // same inputs → hit
+    expect(loadCache('photos', fpB)).toBeNull();                        // changed album → miss
+  });
+
+  it('leaves id-only readers and non-fingerprinted caches exactly as they were', () => {
+    saveCache('lirr', { departures: [] }, 5); // a module with no declared inputs
+    expect(loadCache('lirr')).toEqual({ t: 5, data: { departures: [] } }); // stored shape unchanged
+    // A fingerprinted cache is still visible to an id-only read (opt-in gating).
+    saveCache('photos', { photos: ['a'] }, 1, cacheFingerprint({ album: 'A' }));
+    expect(loadCache('photos')?.data).toEqual({ photos: ['a'] });
+  });
+
+  it('rejects a legacy cache written before fingerprints existed', () => {
+    saveCache('photos', { photos: ['a'] }, 1); // pre-fix cache: no fp stored
+    expect(loadCache('photos', cacheFingerprint({ album: 'A' }))).toBeNull();
+  });
+
+  it('is order-independent, so a cosmetic key reshuffle is not a new source', () => {
+    expect(cacheFingerprint({ lat: 1, lon: 2 })).toBe(cacheFingerprint({ lon: 2, lat: 1 }));
+    expect(cacheFingerprint(null)).toBeNull();
   });
 });
 

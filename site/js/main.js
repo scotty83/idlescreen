@@ -1,7 +1,7 @@
 // Boot and runtime orchestration for the signage dashboard.
 
 import { normalizeConfig, decodeConfig, CURATED_SOURCES } from './config.js';
-import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, takePendingEdit, applyConfig, isDemoSession } from './store.js';
+import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, cacheFingerprint, takePendingEdit, applyConfig, isDemoSession } from './store.js';
 import { fetchJSON, fetchBuffer, fetchText } from './net.js';
 import { fitViewport, narrowViewportToGlass } from './util.js';
 import { cardFor, markFresh, markStale, setCardConfigSource } from './card.js';
@@ -141,7 +141,11 @@ const BOOT_STAGGER_MAX_MS = 1800;
 
 function startWidget(mod, rect, startDelayMs = 0) {
   const card = cardFor(mod, rect);
-  const cached = loadCache(mod.meta.id);
+  // The fetch-input fingerprint for THIS config: a module that declares no
+  // inputs (meta.cacheInputs absent) gets null and keeps the id-only behaviour;
+  // one that does (photos, weather) only loads a cache its inputs match (F09).
+  const fp = mod.meta.cacheInputs ? cacheFingerprint(mod.meta.cacheInputs(cfg)) : null;
+  const cached = loadCache(mod.meta.id, fp);
   if (cached) {
     renderWidget(mod, cached.data);
     // The payload's own source time, not the moment it was written: a Worker
@@ -152,8 +156,9 @@ function startWidget(mod, rect, startDelayMs = 0) {
     try {
       const vm = await mod.fetchData(cfg, net);
       // Persist the payload's source age so a stale digest keeps its true "as
-      // of" across a reload instead of being re-stamped to now (F10).
-      saveCache(mod.meta.id, vm, cacheStampFor(vm));
+      // of" across a reload instead of being re-stamped to now (F10), stamped
+      // with the inputs that produced it (F09).
+      saveCache(mod.meta.id, vm, cacheStampFor(vm), fp);
       renderWidget(mod, vm);
       // A worker-served stale fallback (up to 24h old) must not read as fresh:
       // dim the card and stamp its age instead of clearing the stale mark.
@@ -163,7 +168,7 @@ function startWidget(mod, rect, startDelayMs = 0) {
       reportWidgetHealth(mod.meta.id, vm?.stale ? 'stale' : null);
     } catch (err) {
       reportWidgetHealth(mod.meta.id, 'error');
-      markStale(card, cacheAgeOf(loadCache(mod.meta.id)));
+      markStale(card, cacheAgeOf(loadCache(mod.meta.id, fp)));
       throw err; // let the scheduler back off
     }
   }, mod.meta.refreshMs, { startDelayMs });
@@ -176,7 +181,14 @@ function renderStrip() {
   if (!DEMO && !isAmbient()) return;
   if (cfg?.screensaver?.strip === false) return; // Screensaver page turned the band off
   const caches = {};
-  for (const id of ['weather', 'lirr', 'mnr', 'njt']) caches[id] = loadCache(id)?.data;
+  // Same fingerprint gate as startWidget: a weather cache from the old location
+  // must not feed the strip after a move (F09). Transit ids declare no inputs,
+  // so they read as before.
+  for (const id of ['weather', 'lirr', 'mnr', 'njt']) {
+    const mod = getWidget(id);
+    const fp = mod?.meta.cacheInputs ? cacheFingerprint(mod.meta.cacheInputs(cfg)) : null;
+    caches[id] = loadCache(id, fp)?.data;
+  }
   const data = DEMO && fixtures
     ? stripData(
         {

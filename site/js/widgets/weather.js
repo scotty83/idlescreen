@@ -7,7 +7,13 @@ import { setCardNote } from '../card.js';
 import { icon } from '../icons.js';
 import { setExpandSource } from '../expand.js';
 
-export const meta = { id: 'weather', title: 'Weather', refreshMs: 10 * 60 * 1000 };
+export const meta = {
+  id: 'weather', title: 'Weather', refreshMs: 10 * 60 * 1000,
+  // Location drives the fetch; units and the label are presentation, converted
+  // at render and never refetched, so they stay out of the cache fingerprint —
+  // a cache from the old location must not paint after a move (store.js F09).
+  cacheInputs: (cfg) => ({ lat: cfg?.loc?.lat ?? null, lon: cfg?.loc?.lon ?? null }),
+};
 
 // An hour worth planning around. The card's own droplet threshold, hoisted to a
 // constant so the overlay's wet marking can't drift away from the card's.
