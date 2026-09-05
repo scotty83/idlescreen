@@ -243,21 +243,13 @@ describe('/code exchange', () => {
     const big = JSON.stringify({ cfg: 'x'.repeat(5000) });
     expect((await call('/code', { method: 'POST', body: big, headers: from(3) })).status).toBe(413);
   });
-  it('bounds the transport body and denies malformed bodies a throttle bypass', async () => {
-    // A valid small cfg hidden inside a huge padding field used to be buffered
-    // and parsed in full before the cfg-length check ran — the transport cap now
-    // rejects it before either. (Before this fix the small cfg minted a 200.)
+  it('bounds the transport body before parsing (a small cfg behind huge padding is rejected)', async () => {
+    // F15: a valid small cfg hidden inside a huge padding field used to be
+    // buffered and JSON-parsed in full before the cfg-length check ran, so the
+    // field cap was bypassed entirely. The transport cap now rejects the body up
+    // front. (Before this fix the small cfg minted a 200.)
     const padded = JSON.stringify({ cfg: 'x', pad: 'p'.repeat(40000) });
     expect((await call('/code', { method: 'POST', body: padded, headers: { 'CF-Connecting-IP': '172.17.0.1' } })).status).toBe(413);
-
-    // A malformed body used to return 400 WITHOUT installing the throttle marker,
-    // so an attacker could hammer /code forever. The marker is now set before the
-    // body is read, so the same IP's next request is throttled. (Before the fix
-    // the follow-up minted a 200.)
-    const bad = await call('/code', { method: 'POST', body: 'not json', headers: { 'CF-Connecting-IP': '172.17.0.2' } });
-    expect(bad.status).toBe(400);
-    const next = await call('/code', { method: 'POST', body: JSON.stringify({ cfg: 'ok' }), headers: { 'CF-Connecting-IP': '172.17.0.2' } });
-    expect(next.status).toBe(429);
   });
   it('404s unknown codes', async () => {
     expect((await call('/code/ZZZZZZ')).status).toBe(404);
@@ -912,10 +904,13 @@ describe('/code rate limiting', () => {
     expect((await call('/code', init)).status).toBe(200);
     expect((await call('/code', init)).status).toBe(429);
   });
-  it('does not throttle on invalid requests', async () => {
+  it('throttles even after an invalid request (a malformed body cannot skip the speed bump)', async () => {
+    // F15: the marker is installed BEFORE the body is read, so a flood of
+    // malformed or oversized bodies can no longer slip past the per-IP speed
+    // bump. A bad first request still answers 400, but it spends the window.
     const ip = { 'CF-Connecting-IP': '1.2.3.4' };
     expect((await call('/code', { method: 'POST', body: 'nope', headers: ip })).status).toBe(400);
-    expect((await call('/code', { method: 'POST', body: JSON.stringify({ cfg: 'ok123' }), headers: ip })).status).toBe(200);
+    expect((await call('/code', { method: 'POST', body: JSON.stringify({ cfg: 'ok123' }), headers: ip })).status).toBe(429);
   });
   it('429s a second redemption from the same IP within the window', async () => {
     // Redemption (GET /code/:code) shares the CODES read quota with the NJT
