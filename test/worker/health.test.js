@@ -394,6 +394,18 @@ describe('stale-age on the three routes that could serve day-old cache unwatched
       expect(brief.detail).toMatch(/ok \(stale \d+ min\)/);
     });
   }
+
+  it('ferry: a FROZEN upstream (stale:false with an expired feed clock) still FAILS', async () => {
+    // The ferry mapper preserves the upstream feed timestamp but clears stale on
+    // every live 200, so a feed stuck on yesterday's protobuf reports stale:false
+    // with a 6h-old updatedAt. The age check has to catch it independent of the
+    // stale flag — nested inside the stale branch this was reported healthy.
+    const frozen = JSON.stringify({ ...OK_BODIES['/ferry/departures'], stale: false, updatedAt: nowSec() - 6 * 3600 });
+    const r = (await run({ '/ferry/departures': { body: frozen } })).results.find((x) => x.name === 'ferry');
+    expect(r.ok).toBe(false);
+    expect(r.detail).toMatch(/stale \d+ min old/);
+    expect(r.stale).toBe(false); // truthful: the worker never flagged it stale, the age threshold did
+  });
 });
 
 describe('setup-code canary: read mode (what the public /health route runs)', () => {

@@ -10,10 +10,13 @@
 // Cloudflare 522). Checks with `url` are external and use plain fetch. A check
 // with `canary` runs code instead of probing an endpoint, for the dependency
 // that has no route to watch (the CODES KV setup-code service; see codeCanary).
-// `maxStaleSec` (own-route checks only): when the worker serves last-good cache
-// (`stale: true`) because the upstream refresh keeps failing, tolerate a brief
-// blip but FAIL once the data is older than this, that sustained-stale window is
-// exactly how the NJT token cap and similar silent degradations show up.
+// `maxStaleSec` (own-route checks only): the maximum age the payload's updatedAt
+// may reach before the check FAILS, enforced regardless of the `stale` flag. It
+// catches two silent degradations: the worker serving last-good cache
+// (`stale: true`) while an upstream refresh keeps failing, AND a frozen upstream
+// that keeps answering 200 with `stale: false` but an ever-older feed clock (the
+// ferry feed does exactly this). A brief blip inside the window is tolerated;
+// past it the data is misleading — how the NJT token cap and similar show up.
 // Self-hosters: change the hosts/paths (or delete the [triggers] block in
 // wrangler.toml to turn the cron off).
 
@@ -324,14 +327,21 @@ async function probe(check, selfFetch, extFetch, ctx = {}) {
     if (check.path && age === null) {
       return { name: check.name, ok: false, detail: 'no updatedAt (unstamped payload)' };
     }
-    // stale=true means the worker served last-good cache because the upstream
-    // refresh failed. Tolerate a brief blip; FAIL once it's older than
-    // maxStaleSec (the upstream has been down a while and the data is misleading).
+    // Age first, independent of the stale flag. A frozen upstream that keeps
+    // answering 200 reports stale:false but an ever-older updatedAt (the ferry
+    // feed preserves the upstream feed clock and always clears stale on a live
+    // response); nesting this test inside the stale branch let that sail through
+    // forever. Past maxStaleSec the data is misleading whether or not the worker
+    // itself flagged the cache stale, so FAIL either way.
+    if (check.maxStaleSec && age !== null && age > check.maxStaleSec) {
+      const mins = Math.round(age / 60);
+      return { name: check.name, ok: false, detail: `stale ${mins} min old`, stale: json.stale === true, ageSec: age };
+    }
+    // stale=true within the age budget is a tolerable blip: the worker served
+    // last-good cache because the upstream refresh failed, but the data is recent
+    // enough to still trust. Report it descriptively, ok.
     if (json.stale === true) {
       const mins = age === null ? null : Math.round(age / 60);
-      if (check.maxStaleSec && age !== null && age > check.maxStaleSec) {
-        return { name: check.name, ok: false, detail: `stale ${mins} min old`, stale: true, ageSec: age };
-      }
       return { name: check.name, ok: true, detail: mins === null ? 'ok (stale cache)' : `ok (stale ${mins} min)`, stale: true, ageSec: age };
     }
     return { name: check.name, ok: true, detail: 'ok', stale: false };
