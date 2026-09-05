@@ -25,7 +25,7 @@ export const isExpressRoute = (shortName) => /^(QM|BM|SIM|X)\d+[A-Z]?$/.test(sho
 // bus feeds — stop names use '/', not ','). If a future feed adds quoted commas,
 // this parser must be upgraded.
 function table(zipPath, name) {
-  const txt = execFileSync('unzip', ['-p', zipPath, name], { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 });
+  const txt = execFileSync('unzip', ['-p', zipPath, name], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
   const unquote = (c) => c.replace(/^"|"$/g, '');
   const [header, ...lines] = txt.trim().split(/\r?\n/);
   const cols = header.split(',').map(unquote);
