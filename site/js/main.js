@@ -6,7 +6,7 @@ import { fetchJSON, fetchBuffer, fetchText } from './net.js';
 import { fitViewport, narrowViewportToGlass } from './util.js';
 import { cardFor, markFresh, markStale, setCardConfigSource } from './card.js';
 import { blockZoomGestures } from './zoomguard.js';
-import { schedule } from './scheduler.js';
+import { schedule, dailyRefresh } from './scheduler.js';
 import { resolveMode, ambientSource } from './modes.js';
 import { chooseBootConfig, fragmentConfig } from './boot.js';
 import { stripData, stripHtml } from './ambient.js';
@@ -171,7 +171,11 @@ function startWidget(mod, rect, startDelayMs = 0) {
       markStale(card, cacheAgeOf(loadCache(mod.meta.id, fp)));
       throw err; // let the scheduler back off
     }
-  }, mod.meta.refreshMs, { startDelayMs });
+    // Daily widgets refresh at the next local midnight (calendar), not a
+    // jittered 24h from the last fetch, so their content turns over with the
+    // date (F08). Everything else keeps the fixed-period, fractionally jittered
+    // cadence.
+  }, mod.meta.daily ? dailyRefresh() : mod.meta.refreshMs, { startDelayMs, jitter: mod.meta.daily ? 0 : 0.15 });
   cancels.push(cancel);
 }
 

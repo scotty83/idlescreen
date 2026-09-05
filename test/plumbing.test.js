@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
 import { loadConfig, saveConfig, loadCache, saveCache, cacheStampFor, cacheAgeOf, cacheFingerprint } from '../site/js/store.js';
-import { schedule } from '../site/js/scheduler.js';
+import { schedule, msUntilNextLocalMidnight, dailyRefresh } from '../site/js/scheduler.js';
 import { resolveMode, stepTime, fmtHM } from '../site/js/modes.js';
 import { normalizeConfig, encodeConfig } from '../site/js/config.js';
 
@@ -206,6 +206,58 @@ describe('scheduler', () => {
     for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(8000);
     cancel();
     expect(Math.max(...delays)).toBe(8000);
+  });
+
+  // F08: a function interval lets a daily widget schedule against the local
+  // calendar instead of a fixed period; it is recomputed after each run.
+  it('accepts a function interval, recomputed after each run', async () => {
+    const fn = vi.fn().mockResolvedValue(undefined);
+    const delays = [3000, 7000];
+    let i = 0;
+    const cancel = schedule(fn, () => delays[Math.min(i++, delays.length - 1)], { jitter: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fn).toHaveBeenCalledTimes(1); // immediate first run
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fn).toHaveBeenCalledTimes(2); // used the first computed delay
+    await vi.advanceTimersByTimeAsync(6999);
+    expect(fn).toHaveBeenCalledTimes(2); // and the second, not before it elapses
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(3);
+    cancel();
+  });
+});
+
+// F08: daily widgets turn over with the local DATE, not 24h after the last
+// fetch. A jittered 24h interval drifts off the date boundary; a calendar
+// schedule lands on it.
+describe('daily calendar scheduling', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('measures the time to the next LOCAL midnight', () => {
+    expect(msUntilNextLocalMidnight(new Date(2026, 8, 4, 22, 30))).toBe(90 * 60 * 1000);
+    // At midnight, a full day to the NEXT one — never a zero-delay hot loop.
+    expect(msUntilNextLocalMidnight(new Date(2026, 8, 4, 0, 0))).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('dailyRefresh waits for midnight on success, retries soon on failure', () => {
+    const at2230 = new Date(2026, 8, 4, 22, 30).getTime();
+    const next = dailyRefresh({ retryMs: 5 * 60 * 1000, jitterMs: 0, now: () => at2230 });
+    expect(next({ failed: false })).toBe(90 * 60 * 1000);        // to the date boundary
+    expect(next({ failed: true })).toBe(5 * 60 * 1000);          // not a whole day later
+  });
+
+  it('drives a schedule across the local date boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 4, 23, 59)); // one minute to midnight
+    const fn = vi.fn().mockResolvedValue(undefined);
+    const cancel = schedule(fn, dailyRefresh({ jitterMs: 0 }), { jitter: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fn).toHaveBeenCalledTimes(1); // fetch now
+    await vi.advanceTimersByTimeAsync(60 * 1000 - 1);
+    expect(fn).toHaveBeenCalledTimes(1); // nothing before midnight
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(2); // refreshes AT the boundary
+    cancel();
   });
 });
 

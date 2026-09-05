@@ -3,7 +3,9 @@
 import { escapeHtml, dailyPick } from '../util.js';
 import { bodyPx, bodyWidthPx, cardSize, sizeTier } from '../capacity.js';
 
-export const meta = { id: 'quote', title: 'Quote of the Day', refreshMs: 24 * 60 * 60 * 1000 };
+// `daily`: refresh at the next local midnight so the quote turns over with the
+// date, not 24h after the last fetch (see scheduler.dailyRefresh).
+export const meta = { id: 'quote', title: 'Quote of the Day', refreshMs: 24 * 60 * 60 * 1000, daily: true };
 
 // What the card can hold, in the only currency a quote has: lines, and the
 // characters that fit them. Pure canvas arithmetic, the same shape capacity.js

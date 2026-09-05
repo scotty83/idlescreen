@@ -45,7 +45,7 @@ import { setMode } from '../site/js/screensaver.js';
 // Every card below is the REAL card the board mounts, tier classes and all,
 // which is the point: these renderers branch on the card they are handed.
 import { applyCardRect } from '../site/js/card.js';
-import { mountCard } from './helpers/board.js';
+import { mountCard, board } from './helpers/board.js';
 import { sparkPath, sparkDividerX, yForValue, colorSplit, splitAtX, normalizeSymbol } from '../site/js/widgets/markets.js';
 import { chaikin } from '../site/js/util.js';
 
@@ -1659,5 +1659,24 @@ describe('amtrak render', () => {
     const el = document.createElement('div');
     amtrak.render(el, { station: 'NYP', updatedAt: now, stale: false, alerts: [], departures: [] }, { amtrak: { dest: '', alerts: true } });
     expect(el.textContent).toContain('No departures');
+  });
+});
+
+// F08: the expanded reading list is labelled by the date the events are FOR
+// (stamped into the vm by fetchData), not the day the card happens to be tapped.
+// A board left on across midnight still shows yesterday's rows until the next
+// fetch, and labelling them "today" is exactly the mismatch this closes.
+describe('history labels its expanded view by the events’ date', () => {
+  const overlayNote = () => document.querySelector('#expand-view .expand__note')?.textContent ?? '';
+
+  it('reads the stamped date, not the wall clock at tap time', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 4, 0, 30)); // it is now Sept 4, just past midnight
+    const janFifteen = new Date(2026, 0, 15, 12, 0).getTime(); // but these events are Jan 15's
+    const vm = { events: [{ year: 1776, text: 'Continental Congress convenes.' }], date: janFifteen };
+    const { card } = board(history, { rect: { w: 6, h: 2 }, vm });
+    card.querySelector('.card__body').click(); // open the grand reading list
+    expect(overlayNote()).toBe('January 15');
+    vi.useRealTimers();
   });
 });
