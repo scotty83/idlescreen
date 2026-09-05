@@ -16,6 +16,15 @@ const JOLPICA = 'https://api.jolpi.ca/ergast/f1/current';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
+// Four SEQUENTIAL fetches at 10s each could stack to ~40s — far past the board's
+// 15s fetch (site/js/net.js) and health's 13s self-probe (worker/src/health.js),
+// so a couple of slow blocks failed the whole card. This overall budget shrinks
+// each fetch's timeout to the time left and skips the remaining blocks once it
+// lapses; a skipped block is a rejection like any other, so it degrades to null
+// and marks the digest partial (mendF1 backfills it from the 24h backup).
+export const F1_DEADLINE_MS = 12000; // under the 13s probe, with margin for merge + cache writes
+const F1_MIN_ATTEMPT_MS = 1200; // don't open a fetch with less budget than this
+
 const num = (x) => Number(x);
 
 // The weekend's sessions, in the payload's own vocabulary. Ids are stable and
@@ -165,9 +174,17 @@ export function mapF1(nextJson, lastJson, driversJson, teamsJson) {
   };
 }
 
-export async function fetchF1() {
+// deadlineMs is injectable only so a test can exercise the budget path in a
+// fraction of a second; the route always takes the default.
+export async function fetchF1({ deadlineMs = F1_DEADLINE_MS } = {}) {
+  const deadline = Date.now() + deadlineMs;
   const get = async (path) => {
-    const res = await fetch(`${JOLPICA}/${path}/?format=json`, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000) });
+    // Shrink each fetch's timeout to the remaining budget so the last block
+    // can't outlive the overall deadline.
+    const res = await fetch(`${JOLPICA}/${path}/?format=json`, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(Math.min(10000, deadline - Date.now())),
+    });
     if (!res.ok) throw new Error(`jolpica ${path} ${res.status}`);
     return res.json();
   };
@@ -181,6 +198,9 @@ export async function fetchF1() {
   const paths = ['next', 'last/results', 'driverStandings', 'constructorStandings'];
   const settled = [];
   for (const path of paths) {
+    // Out of budget: skip the rest (they degrade to null and mark the digest
+    // partial) rather than overrun the deadline and take the whole card down.
+    if (deadline - Date.now() < F1_MIN_ATTEMPT_MS) { settled.push({ status: 'rejected' }); continue; }
     try {
       settled.push({ status: 'fulfilled', value: await get(path) });
     } catch (err) {
@@ -189,7 +209,8 @@ export async function fetchF1() {
       console.warn(`[f1] ${path} failed: ${String(err?.message ?? err)}`);
       settled.push({ status: 'rejected' });
     }
-    if (settled.length < paths.length) await new Promise((r) => setTimeout(r, 250));
+    // Only pause between blocks we can still afford — never past the deadline.
+    if (settled.length < paths.length && deadline - Date.now() > F1_MIN_ATTEMPT_MS) await new Promise((r) => setTimeout(r, 250));
   }
   if (settled.every((s) => s.status === 'rejected')) throw new Error('jolpica: all endpoints failed');
   const val = (s) => (s.status === 'fulfilled' ? s.value : null);

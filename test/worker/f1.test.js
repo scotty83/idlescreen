@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import worker from '../../worker/src/index.js';
-import { mapF1 } from '../../worker/src/f1.js';
+import { mapF1, fetchF1 } from '../../worker/src/f1.js';
 import nextFx from './fixtures/f1-next.json';
 import lastFx from './fixtures/f1-last.json';
 import driversFx from './fixtures/f1-drivers.json';
@@ -78,5 +78,26 @@ describe('GET /f1', () => {
     const digest = await (await call('/f1')).json();
     expect(digest.drivers.length).toBeGreaterThan(0);
     expect(digest.teams).toEqual([]); // failed block empty, not fatal
+  });
+
+  it('caps the sequential fan-out at the deadline and still serves the answered block (F13)', async () => {
+    // 'next' answers instantly; 'last/results' hangs until its own abort fires,
+    // by which point the budget is spent and the last two blocks are skipped.
+    // Before the budget, four 10s fetches in series stacked to ~40s and failed
+    // the whole card. A tiny injected budget keeps the test near-instant.
+    vi.stubGlobal('fetch', vi.fn((input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/current/next/')) return Promise.resolve(new Response(JSON.stringify(nextFx), { status: 200 }));
+      // A slow upstream that honours its abort signal, exactly as fetch does
+      // when AbortSignal.timeout fires.
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    }));
+    const digest = await fetchF1({ deadlineMs: 1500 });
+    expect(digest.next.name).toBe('Belgian Grand Prix'); // the block that answered survives
+    expect(digest.partial).toBe(true); // the rest didn't finish -> partial (mendF1 backfills)
+    expect(digest.drivers).toEqual([]); // a skipped block degrades to empty
+    expect(digest.teams).toEqual([]);
   });
 });
