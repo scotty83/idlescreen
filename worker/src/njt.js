@@ -143,14 +143,31 @@ export async function resetNjtToken(env) {
 }
 
 // Return a usable token, minting a new one only when the cache is empty or when
-// `fresh` forces it (after a 401). A minted token is cached for reuse.
-async function njtToken(env, fresh = false) {
+// `fresh` forces it (after a 401). A minted token is cached for reuse. `rejected`
+// is the token the caller just had 401'd, so a forced mint can tell a genuine
+// replacement from the known-bad one it must never hand back.
+async function njtToken(env, fresh = false, rejected = null) {
   if (!fresh) {
     const cached = await readToken(env);
     if (cached) return cached;
     if (tokenInFlight) return tokenInFlight; // a concurrent caller is already minting — join it
+  } else {
+    // Forced re-auth after a 401. A burst of boards all holding the same expired
+    // token would each land here at once; the fix (2026-09-04) is to dedupe these
+    // the way cold mints already are, or the 10/day getToken cap drains in one
+    // burst. Two ways to avoid spending a getToken call:
+    //   - a memo/KV token that DIFFERS from the rejected one is a replacement a
+    //     concurrent caller already minted — reuse it;
+    //   - a mint already in flight is that replacement arriving — join it.
+    // A mint always returns a brand-new upstream token, so joining one can never
+    // hand back the rejected token; the cached-token check guards the same for
+    // the reuse path. Only when neither holds do we drop the known-bad token and
+    // mint one ourselves.
+    const cached = await readToken(env);
+    if (cached && cached !== rejected) return cached;
+    if (tokenInFlight) return tokenInFlight;
+    tokenMemo = null; // the current token is confirmed bad
   }
-  if (fresh) tokenMemo = null; // the current token is known-bad
   const mint = (async () => {
     const tok = await form(`${BASE}/getToken`, { username: env.NJT_USER, password: env.NJT_PASS });
     const token = tok?.UserToken;
@@ -158,13 +175,13 @@ async function njtToken(env, fresh = false) {
     await writeToken(env, token);
     return token;
   })();
-  // Only publish the non-forced mint: a `fresh` re-auth knows the current token
-  // is bad, so it must not be handed to callers still holding the stale one.
-  if (!fresh) tokenInFlight = mint;
+  // Publish for cold AND forced mints so concurrent callers of either kind share
+  // one getToken call — the whole point of the in-flight guard.
+  tokenInFlight = mint;
   try {
     return await mint;
   } finally {
-    if (!fresh && tokenInFlight === mint) tokenInFlight = null;
+    if (tokenInFlight === mint) tokenInFlight = null;
   }
 }
 
@@ -197,11 +214,14 @@ export function mapNjtMessages(json) {
 // cached token, and only on a token rejection spend a fresh mint and retry once.
 // The station is always New York Penn (the board mirrors LIRR/Amtrak).
 async function withReauth(env, oneCall) {
+  const token = await njtToken(env, false);
   try {
-    return await oneCall(await njtToken(env, false));
+    return await oneCall(token);
   } catch (err) {
     if (!isAuthError(err)) throw err; // transient upstream failure — don't burn a token
-    return oneCall(await njtToken(env, true)); // token expired: re-authenticate once
+    // Pass the rejected token so the forced mint reuses a replacement another
+    // caller already fetched instead of spending its own getToken call.
+    return oneCall(await njtToken(env, true, token)); // token expired: re-authenticate once
   }
 }
 

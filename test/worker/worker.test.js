@@ -5,7 +5,7 @@ import { digestNext, digestSchedule, fetchTeamSummary, mapTeamSummary } from '..
 import { ESPN_UA } from '../../worker/src/espn.js';
 import { env } from 'cloudflare:test';
 import worker, { guardFetch } from '../../worker/src/index.js';
-import { resetNjtToken, nyDate } from '../../worker/src/njt.js';
+import { resetNjtToken, nyDate, fetchNjtSchedule } from '../../worker/src/njt.js';
 import { mapRidePath } from '../../worker/src/path.js';
 import GtfsRt from 'gtfs-realtime-bindings';
 import { mapFerryFeed } from '../../worker/src/ferry.js';
@@ -353,6 +353,38 @@ describe('/njt/departures', () => {
       call('/njt/departures', {}, NJT_ENV),
     ]);
     expect(calls.filter((u) => /getToken/.test(u)).length).toBe(1);
+  });
+
+  it('dedupes concurrent forced re-auth mints on a shared 401 (getToken fires once)', async () => {
+    // A burst of boards all holding the same expired token: each getStationSchedule
+    // 401s and forces a re-auth at the same instant. The forced path used to mint
+    // per caller, so three concurrent rejections spent three of the 10/day getToken
+    // calls; now they share one mint. This stub keys the 401 on the rejected token
+    // (not a call count) so the retries succeed regardless of interleaving.
+    await resetNjtToken(env);
+    await env.CODES.put('njt:token', 'expired'); // the token every caller reads, then has rejected
+    const njtEnv = { ...env, ...NJT_ENV };
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const u = typeof url === 'string' ? url : url.url;
+      calls.push(u);
+      if (/getToken/.test(u)) {
+        return new Response(JSON.stringify({ UserToken: 'fresh' }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      if (/getStationSchedule/.test(u)) {
+        const token = new URLSearchParams(String(init?.body ?? '')).get('token');
+        if (token === 'expired') return new Response('unauth', { status: 401 });
+        return new Response(JSON.stringify(SCHEDULE_RESPONSE), { headers: { 'Content-Type': 'application/json' } });
+      }
+      throw new Error(`unmocked fetch: ${u}`);
+    }));
+    const results = await Promise.all([
+      fetchNjtSchedule(njtEnv),
+      fetchNjtSchedule(njtEnv),
+      fetchNjtSchedule(njtEnv),
+    ]);
+    expect(calls.filter((u) => /getToken/.test(u)).length).toBe(1); // one mint for the whole burst
+    for (const r of results) expect(r.trains).toHaveLength(2); // every caller re-authed and got the schedule
   });
 
   it('serves a prior-day timetable (stale) when today\'s fetch fails', async () => {
