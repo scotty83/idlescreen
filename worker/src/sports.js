@@ -3,6 +3,12 @@
 // ~2 MB — far too heavy for gen1 boards — so it's digested here and cached
 // long (results change at most a few times a day).
 //
+// Subrequest budget: the Workers Free plan allows 50 per invocation, and
+// fetch, Cache API match and Cache API put each count as one. /sports/team
+// spends at most 8: cached()'s fresh-entry match and its fresh + stale puts
+// (3), the team fetch (1), and 4 in here whichever way the two cached lookups
+// below go (see cachedLiveComp).
+//
 // Every fetch here MUST carry ESPN_UA — ESPN's edge 403s a request without it.
 // See worker/src/espn.js for why the string looks the way it does.
 
@@ -106,7 +112,7 @@ async function cachedSchedLines(origin, lg, id, abbr, base) {
     const hit = await cache.match(key);
     if (hit) {
       const j = await hit.json();
-      return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null };
+      return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null, fromCache: true };
     }
   }
   let lastLine = null;
@@ -132,7 +138,81 @@ async function cachedSchedLines(origin, lg, id, abbr, base) {
       // best-effort
     }
   }
-  return { lastLine, nextLine };
+  return { lastLine, nextLine, fromCache: false };
+}
+
+// The competition fields eventLine and mapTeamSummary read, and nothing else:
+// the status and each side's home/away, abbreviation and score, keyed by event
+// id so every followed team in the league joins the same digest. A 'pre' game
+// is left out on purpose. The join only runs for a team the team endpoint
+// already calls live, and a digest cached just before first pitch would flip
+// that row back to pre-game for up to a minute; a missing event degrades to
+// the scoreless live line instead, which at least has the state right.
+export function digestScoreboard(sbJson) {
+  const games = {};
+  for (const e of sbJson?.events ?? []) {
+    const comp = e.competitions?.[0];
+    const state = comp?.status?.type?.state;
+    if (!e.id || !comp || state === 'pre') continue;
+    games[e.id] = {
+      status: { type: { state, shortDetail: comp.status?.type?.shortDetail } },
+      competitors: (comp.competitors ?? []).map((c) => ({
+        homeAway: c.homeAway,
+        team: { abbreviation: c.team?.abbreviation },
+        score: score(c),
+      })),
+    };
+  }
+  return games;
+}
+
+// The team endpoint nulls competitor scores while a game is live; only the
+// league scoreboard carries them (verified 2026-07-03). That scoreboard is the
+// same ~300 KB whichever team asks, so it is digested (above) onto one 60s
+// Cache-API entry per league rather than downloaded again for every followed
+// team that is playing. Worker-side only: the scoreboard never reaches a board,
+// and it is fetched solely while a followed team is actually playing. A failed
+// fetch is not cached; the next live team simply tries again, as each always did.
+//
+// useCache is the subrequest budget (see the top of this file). The cached path
+// costs up to 3 (match, fetch, put) against the bare fetch's 1, so it runs only
+// when this invocation did not also pay for a schedule download (match, fetch,
+// put: another 3). That miss comes once per team per half hour; on that one
+// call the scoreboard is fetched directly and the digest is neither read nor
+// written.
+async function cachedLiveComp(origin, lg, eventId, useCache) {
+  const cache = caches.default;
+  const key = useCache && origin && new Request(`${origin}/__cache/sb/${lg}`);
+  if (key) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) {
+        const games = await hit.json();
+        return Object.hasOwn(games, eventId) ? games[eventId] : null;
+      }
+    } catch {
+      // An unreadable entry is a miss.
+    }
+  }
+  let games = null;
+  try {
+    const sbRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${LEAGUE_PATHS[lg]}/scoreboard`, {
+      headers: { 'User-Agent': ESPN_UA },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (sbRes.ok) games = digestScoreboard(await sbRes.json());
+  } catch {
+    games = null;
+  }
+  if (!games) return null; // scoreless live line still renders cleanly
+  if (key) {
+    try {
+      await cache.put(key, new Response(JSON.stringify(games), { headers: { 'Cache-Control': 'max-age=60' } }));
+    } catch {
+      // best-effort
+    }
+  }
+  return Object.hasOwn(games, eventId) ? games[eventId] : null;
 }
 
 export async function fetchTeamSummary(lg, id, origin) {
@@ -145,26 +225,12 @@ export async function fetchTeamSummary(lg, id, origin) {
   const teamJson = await teamRes.json();
   const abbr = teamJson?.team?.abbreviation ?? '';
 
-  const { lastLine, nextLine } = await cachedSchedLines(origin, lg, id, abbr, base);
-  // The team endpoint nulls competitor scores while a game is live; only the
-  // league scoreboard carries them (verified 2026-07-03). Join by event id,
-  // Worker-side only — the ~250 KB scoreboard never reaches a board, and it's
-  // fetched solely while a followed team is actually playing.
+  const { lastLine, nextLine, fromCache } = await cachedSchedLines(origin, lg, id, abbr, base);
+  // Join the live game's scores by event id (see cachedLiveComp).
   let liveComp = null;
   const nextEv = teamJson?.team?.nextEvent?.[0];
   if (nextEv?.competitions?.[0]?.status?.type?.state === 'in') {
-    try {
-      const sbRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${LEAGUE_PATHS[lg]}/scoreboard`, {
-        headers: { 'User-Agent': ESPN_UA },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (sbRes.ok) {
-        const sb = await sbRes.json();
-        liveComp = (sb.events ?? []).find((e) => e.id === nextEv.id)?.competitions?.[0] ?? null;
-      }
-    } catch {
-      liveComp = null; // scoreless live line still renders cleanly
-    }
+    liveComp = await cachedLiveComp(origin, lg, nextEv.id, fromCache);
   }
   return { row: mapTeamSummary(teamJson, lastLine || null, lg, liveComp, nextLine || null) };
 }

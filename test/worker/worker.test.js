@@ -1,7 +1,7 @@
 import { fetchGolf, fetchTennis } from '../../worker/src/scores.js';
 import { runHealthChecks } from '../../worker/src/health.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { digestNext, digestSchedule, fetchTeamSummary, mapTeamSummary } from '../../worker/src/sports.js';
+import { digestNext, digestSchedule, digestScoreboard, fetchTeamSummary, mapTeamSummary } from '../../worker/src/sports.js';
 import { ESPN_UA } from '../../worker/src/espn.js';
 import { env } from 'cloudflare:test';
 import worker, { guardFetch } from '../../worker/src/index.js';
@@ -859,8 +859,22 @@ describe('/sports/team live scores', () => {
       ],
     }] }],
   } };
+  // A second followed team, live in a different game on the same scoreboard.
+  const TEAM_LIVE_BOS = { team: {
+    id: '2', abbreviation: 'BOS', shortDisplayName: 'Red Sox', logos: [],
+    nextEvent: [{ id: '999', competitions: [{
+      status: { type: { state: 'in', shortDetail: 'Bot 3rd' } },
+      competitors: [
+        { homeAway: 'home', team: { abbreviation: 'BOS' }, score: null },
+        { homeAway: 'away', team: { abbreviation: 'TB' }, score: null },
+      ],
+    }] }],
+  } };
   const SCOREBOARD = { events: [
-    { id: '999', competitions: [{ status: { type: { state: 'in', shortDetail: 'Bot 3rd' } }, competitors: [] }] },
+    { id: '999', competitions: [{ status: { type: { state: 'in', shortDetail: 'Bot 3rd' } }, competitors: [
+      { homeAway: 'home', team: { abbreviation: 'BOS' }, score: '1' },
+      { homeAway: 'away', team: { abbreviation: 'TB' }, score: '0' },
+    ] }] },
     { id: '401816004', competitions: [{
       status: { type: { state: 'in', shortDetail: 'Mid 5th' } },
       competitors: [
@@ -870,8 +884,20 @@ describe('/sports/team live scores', () => {
     }] },
   ] };
 
+  // sports.js keeps two Cache-API entries of its own beside cached()'s: the
+  // per-team schedule lines and the per-league scoreboard digest.
+  const sportsKey = (path) => new Request(`https://api.test/__cache/${path}`);
+  const resetTeams = (...ids) => Promise.all([
+    caches.default.delete(sportsKey('sb/mlb')),
+    ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched2/mlb:${id}`))]),
+  ]);
+  const seedSched = (id) => caches.default.put(
+    sportsKey(`sched2/mlb:${id}`),
+    new Response(JSON.stringify({ lastLine: null, nextLine: null }), { headers: { 'Cache-Control': 'max-age=600' } }),
+  );
+
   it('joins live scores from the league scoreboard by event id', async () => {
-    await clearCache('sports:mlb:10');
+    await resetTeams('10');
     stubFetch([
       { match: /teams\/10$/, body: TEAM_LIVE },
       { match: /teams\/10\/schedule/, body: { events: [] } },
@@ -884,7 +910,7 @@ describe('/sports/team live scores', () => {
   });
 
   it('degrades to a scoreless live line when the scoreboard is unavailable', async () => {
-    await clearCache('sports:mlb:10');
+    await resetTeams('10');
     stubFetch([
       { match: /teams\/10$/, body: TEAM_LIVE },
       { match: /teams\/10\/schedule/, body: { events: [] } },
@@ -894,6 +920,112 @@ describe('/sports/team live scores', () => {
     const body = await res.json();
     expect(body.row.line).toBe('vs MIN · Mid 5th');
     expect(body.row.line).not.toContain('\u2013');
+  });
+
+  it('downloads the league scoreboard once for every followed team playing in it', async () => {
+    await resetTeams('10', '2');
+    await Promise.all([seedSched('10'), seedSched('2')]);
+    // One scoreboard response only: a second download would hit an unmocked
+    // fetch, and the second team would lose its scores.
+    const calls = stubFetch([
+      { match: /teams\/10$/, body: TEAM_LIVE },
+      { match: /teams\/2$/, body: TEAM_LIVE_BOS },
+      { match: /mlb\/scoreboard$/, body: SCOREBOARD },
+    ]);
+    const nyy = await (await call('/sports/team?lg=mlb&id=10')).json();
+    const bos = await (await call('/sports/team?lg=mlb&id=2')).json();
+    expect(nyy.row.line).toBe('3-2 vs MIN · Mid 5th');
+    expect(bos.row.line).toBe('1-0 vs TB · Bot 3rd');
+    expect(calls.filter((u) => /scoreboard$/.test(u))).toHaveLength(1);
+    await resetTeams('10', '2');
+  });
+
+  it('does not cache a failed scoreboard: the next live team tries again', async () => {
+    await resetTeams('10', '2');
+    await Promise.all([seedSched('10'), seedSched('2')]);
+    stubFetch([
+      { match: /teams\/10$/, body: TEAM_LIVE },
+      { match: /teams\/2$/, body: TEAM_LIVE_BOS },
+      { match: /mlb\/scoreboard$/, body: 'down', status: 500 },
+      { match: /mlb\/scoreboard$/, body: SCOREBOARD },
+    ]);
+    expect((await (await call('/sports/team?lg=mlb&id=10')).json()).row.line).toBe('vs MIN · Mid 5th');
+    expect((await (await call('/sports/team?lg=mlb&id=2')).json()).row.line).toBe('1-0 vs TB · Bot 3rd');
+    await resetTeams('10', '2');
+  });
+
+  // Workers Free allows 50 subrequests per invocation, and every fetch, Cache
+  // API match and put counts. The per-league digest adds a match and a put to
+  // the scoreboard path, so sports.js takes it only when the schedule lines
+  // came from cache; either way one /sports/team call stays at the 8 it cost
+  // before the digest existed.
+  describe('subrequest budget', () => {
+    const cacheProto = Object.getPrototypeOf(caches.default);
+    let spies = [];
+    const countSubrequests = (fetchCalls) => {
+      spies = [vi.spyOn(cacheProto, 'match'), vi.spyOn(cacheProto, 'put')];
+      return () => fetchCalls.length + spies.reduce((n, s) => n + s.mock.calls.length, 0);
+    };
+    afterEach(() => spies.forEach((s) => s.mockRestore()));
+
+    it('spends at most 8 when the schedule lines miss (scoreboard fetched bare)', async () => {
+      await resetTeams('10');
+      const calls = stubFetch([
+        { match: /teams\/10$/, body: TEAM_LIVE },
+        { match: /teams\/10\/schedule$/, body: { events: [] } },
+        { match: /mlb\/scoreboard$/, body: SCOREBOARD },
+      ]);
+      const spent = countSubrequests(calls);
+      expect((await (await call('/sports/team?lg=mlb&id=10')).json()).row.line).toBe('3-2 vs MIN · Mid 5th');
+      expect(spent()).toBeLessThanOrEqual(8);
+      spies.forEach((s) => s.mockRestore());
+      // This call neither read nor wrote the digest.
+      expect(await caches.default.match(sportsKey('sb/mlb'))).toBeFalsy();
+      await resetTeams('10');
+    });
+
+    it('spends at most 8 when the schedule lines hit and the digest misses', async () => {
+      await resetTeams('10');
+      await seedSched('10');
+      const calls = stubFetch([
+        { match: /teams\/10$/, body: TEAM_LIVE },
+        { match: /mlb\/scoreboard$/, body: SCOREBOARD },
+      ]);
+      const spent = countSubrequests(calls);
+      expect((await (await call('/sports/team?lg=mlb&id=10')).json()).row.line).toBe('3-2 vs MIN · Mid 5th');
+      expect(spent()).toBeLessThanOrEqual(8);
+      spies.forEach((s) => s.mockRestore());
+      expect(await caches.default.match(sportsKey('sb/mlb'))).toBeTruthy();
+      await resetTeams('10');
+    });
+  });
+});
+
+describe('digestScoreboard', () => {
+  it('keeps only the fields a row reads, keyed by event id, and leaves pre-game events out', () => {
+    const sb = { events: [
+      { id: '1', name: 'Twins at Yankees', competitions: [{
+        venue: { fullName: 'Yankee Stadium' },
+        status: { clock: 0, period: 5, type: { id: '2', state: 'in', shortDetail: 'Mid 5th', detail: 'Middle of the 5th' } },
+        competitors: [
+          { homeAway: 'home', team: { abbreviation: 'NYY', logo: 'x.png' }, score: '3', linescores: [{ value: 1 }] },
+          { homeAway: 'away', team: { abbreviation: 'MIN' }, score: { value: 2 } },
+        ],
+      }] },
+      { id: '2', competitions: [{ status: { type: { state: 'pre', shortDetail: '7:05 PM' } }, competitors: [] }] },
+      { id: '3', competitions: [{ status: { type: { state: 'post', shortDetail: 'Final' } } }] },
+    ] };
+    expect(digestScoreboard(sb)).toEqual({
+      1: {
+        status: { type: { state: 'in', shortDetail: 'Mid 5th' } },
+        competitors: [
+          { homeAway: 'home', team: { abbreviation: 'NYY' }, score: '3' },
+          { homeAway: 'away', team: { abbreviation: 'MIN' }, score: '2' },
+        ],
+      },
+      3: { status: { type: { state: 'post', shortDetail: 'Final' } }, competitors: [] },
+    });
+    expect(digestScoreboard(null)).toEqual({});
   });
 });
 
