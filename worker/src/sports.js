@@ -1,7 +1,8 @@
 // "My Teams" composite: ESPN's team endpoint (record, logo, live/next event)
 // plus the last completed game from the schedule endpoint. The schedule runs
 // ~2 MB — far too heavy for gen1 boards — so it's digested here and cached
-// long (results change at most a few times a day).
+// long (results change at most a few times a day). How long a composed row
+// stays fresh depends on its game state (see teamFreshS).
 //
 // Subrequest budget: the Workers Free plan allows 50 per invocation, and
 // fetch, Cache API match and Cache API put each count as one. /sports/team
@@ -71,14 +72,51 @@ export function digestNext(schedJson, ourAbbr, nowMs = Date.now()) {
   return eventLine(future[0].competitions[0], ourAbbr);
 }
 
+// ESPN dates read "2026-09-24T23:05Z" (no seconds; checked live 2026-09-25)
+// -> epoch seconds, or null when absent or unparseable.
+const epochS = (iso) => {
+  const ms = Date.parse(iso ?? '');
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+};
+
+// A 'pre' game dated in the past is either running late (a rain delay, or the
+// second game of a doubleheader waiting on the first) or postponed, and ESPN
+// keeps both 'pre'. Up to this long past its date it is treated as about to
+// start; past it, as postponed.
+const LATE_START_S = 6 * 3600;
+
+// When the next game could start, for the row's TTL (epoch seconds, or null
+// with nothing ahead). Unlike digestNext, which looks for the next fixture to
+// PRINT, this keeps a 'pre' game dated up to LATE_START_S ago: game two of a
+// doubleheader keeps its nominal time while game one runs long, and missing it
+// here would cache the finished game one's row for the idle maximum right up to
+// game two's first pitch.
+export function nextStartAt(schedJson, nowMs = Date.now()) {
+  let next = null;
+  for (const e of schedJson?.events ?? []) {
+    const c = e.competitions?.[0];
+    const at = epochS(e.date ?? c?.date);
+    if (c?.status?.type?.state !== 'pre' || at === null || at * 1000 <= nowMs - LATE_START_S * 1000) continue;
+    if (next === null || at < next) next = at;
+  }
+  return next;
+}
+
 export function pickLogo(logos = []) {
   const dark = logos.find((l) => l.rel?.includes('dark') && !l.rel?.includes('scoreboard'));
   return (dark ?? logos[0])?.href ?? null;
 }
 
-export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine = null) {
+// startsAt and nextStartsAt (epoch seconds) are what teamFreshS reads; the
+// card ignores them. startsAt is the row's own game, from the team endpoint's
+// nextEvent (the same event the scoreboard join matches by id), null with no
+// game. nextStartsAt is the schedule's nextStartAt: null when the schedule has
+// no game ahead, and left OFF the row when the schedule could not be read, so
+// "nothing scheduled" and "could not find out" stay two different answers.
+export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine = null, nextStartsAt) {
   const team = teamJson?.team;
   if (!team) return null;
+  const ev = team.nextEvent?.[0];
   const row = {
     lg,
     abbr: team.abbreviation ?? '',
@@ -91,8 +129,10 @@ export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine
     line: 'No scheduled games',
     lastLine: lastLine ?? null,
     nextLine: nextLine ?? null,
+    startsAt: epochS(ev?.date ?? ev?.competitions?.[0]?.date),
+    ...(nextStartsAt !== undefined && { nextStartsAt }),
   };
-  const comp = liveComp ?? team.nextEvent?.[0]?.competitions?.[0];
+  const comp = liveComp ?? ev?.competitions?.[0];
   if (comp) {
     row.state = comp.status?.type?.state ?? 'pre';
     row.line = eventLine(comp, team.abbreviation, { withWL: row.state === 'post' });
@@ -100,24 +140,82 @@ export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine
   return row;
 }
 
+// /sports/team TTL by game state. A live score is the one thing on the card
+// that moves minute to minute, so a live row, and one whose first pitch is
+// close, lives SPORTS_LIVE_S; a row with nothing about to happen lives until
+// shortly before the next game could, capped at SPORTS_IDLE_MAX_S, so a board's
+// browser answers its own polls from cache for most of the day. The long TTL is
+// only ever given to a state known to be idle: anything unrecognized, or an
+// idle row whose next game could not be looked up, gets SPORTS_UNSURE_S (the
+// flat TTL this route had before).
+export const SPORTS_LIVE_S = 60;
+export const SPORTS_IDLE_MAX_S = 900;
+export const SPORTS_UNSURE_S = 180;
+// A pre-game row this close to its start is treated as live.
+const SOON_S = 20 * 60;
+// An idle row expires this long before the next start, so the refetch that
+// sees the game coming lands inside the SOON_S window, not after first pitch.
+const LEAD_S = 10 * 60;
+
+// Seconds an idle row may live, given when the next game starts: undefined is
+// "could not find out", null is "nothing scheduled".
+function idleFreshS(nextAt, nowS) {
+  if (nextAt === undefined) return SPORTS_UNSURE_S;
+  if (nextAt === null) return SPORTS_IDLE_MAX_S;
+  return Math.max(SPORTS_LIVE_S, Math.min(SPORTS_IDLE_MAX_S, nextAt - LEAD_S - nowS));
+}
+
+// cached()'s ttlS for /sports/team: (digest) => seconds, on the { row } digest.
+//   in                                   -> SPORTS_LIVE_S
+//   pre, starting within SOON_S, or
+//     started under LATE_START_S ago     -> SPORTS_LIVE_S (rain delay, late start)
+//   pre, dated LATE_START_S+ ago         -> postponed: idle until the NEXT game
+//   pre, further out                     -> idle until this game
+//   post, none                           -> idle until the next game (a
+//                                           doubleheader's second, say)
+//   no row, unknown state or start       -> SPORTS_UNSURE_S
+export function teamFreshS(digest, nowMs = Date.now()) {
+  const row = digest?.row;
+  const nowS = nowMs / 1000;
+  switch (row?.state) {
+    case 'in':
+      return SPORTS_LIVE_S;
+    case 'pre': {
+      const at = row.startsAt;
+      if (!Number.isFinite(at)) return SPORTS_UNSURE_S;
+      if (nowS - at >= LATE_START_S) return idleFreshS(row.nextStartsAt, nowS);
+      if (at - nowS <= SOON_S) return SPORTS_LIVE_S;
+      return idleFreshS(at, nowS);
+    }
+    case 'post':
+    case 'none':
+      return idleFreshS(row.nextStartsAt, nowS);
+    default:
+      return SPORTS_UNSURE_S;
+  }
+}
+
 // The schedule payload runs ~2 MB and its lines change a few times a day,
-// but the /sports/team summary is only 180s-cached (for live scores). Cache
-// the digested last-game + next-game lines on their own 30-min Cache-API
-// entry so the heavy schedule isn't re-downloaded every 180s per team.
-// (Key is sched2 — the old sched entries carried lastLine only.)
+// but a /sports/team summary can be as short-lived as a minute (for live
+// scores). Cache the digested last-game + next-game lines, and when the next
+// game could start, on their own 30-min Cache-API entry so the heavy schedule
+// isn't re-downloaded on every summary miss per team.
+// (Key is sched3: sched2 entries carried no nextAt, which teamFreshS would
+// read as "could not find out" for up to half an hour after a deploy.)
 //
 // The key needs only lg and id, so this runs alongside the team fetch rather
 // than after it; teamP is that fetch, awaited only to digest a fresh download.
 // Never rejects: every failure here degrades to null lines.
 async function cachedSchedLines(origin, lg, id, base, teamP) {
   const cache = caches.default;
-  const key = origin && new Request(`${origin}/__cache/sched2/${lg}:${id}`);
+  const key = origin && new Request(`${origin}/__cache/sched3/${lg}:${id}`);
   if (key) {
     try {
       const hit = await cache.match(key);
       if (hit) {
         const j = await hit.json();
-        return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null, fromCache: true };
+        // nextAt is absent from a failure's entry (see below): unknown, not null.
+        return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null, nextAt: j.nextAt, fromCache: true };
       }
     } catch {
       // An unreadable entry is a miss.
@@ -125,6 +223,7 @@ async function cachedSchedLines(origin, lg, id, base, teamP) {
   }
   let lastLine = null;
   let nextLine = null;
+  let nextAt;
   let ok = false;
   try {
     const schedRes = await fetch(`${base}/schedule`, {
@@ -141,23 +240,26 @@ async function cachedSchedLines(origin, lg, id, base, teamP) {
       const abbr = teamJson?.team?.abbreviation || sched?.team?.abbreviation || '';
       lastLine = digestSchedule(sched, abbr);
       nextLine = digestNext(sched, abbr);
+      nextAt = nextStartAt(sched);
       ok = true;
     }
   } catch {
     lastLine = null;
     nextLine = null;
+    nextAt = undefined;
   }
   // A failure is cached too, so an outage is retried at most once a minute per
   // team, but only for that minute: cached for the full half hour like a real
   // result, one ESPN blip hid a team's last and next game for 30 minutes.
+  // JSON drops the undefined nextAt, so a failure's entry reads back unknown.
   if (key) {
     try {
-      await cache.put(key, new Response(JSON.stringify({ lastLine, nextLine }), { headers: { 'Cache-Control': `max-age=${ok ? 1800 : 60}` } }));
+      await cache.put(key, new Response(JSON.stringify({ lastLine, nextLine, nextAt }), { headers: { 'Cache-Control': `max-age=${ok ? 1800 : 60}` } }));
     } catch {
       // best-effort
     }
   }
-  return { lastLine, nextLine, fromCache: false };
+  return { lastLine, nextLine, nextAt, fromCache: false };
 }
 
 // The competition fields eventLine and mapTeamSummary read, and nothing else:
@@ -165,7 +267,7 @@ async function cachedSchedLines(origin, lg, id, base, teamP) {
 // id so every followed team in the league joins the same digest. A 'pre' game
 // is left out on purpose. The join only runs for a team the team endpoint
 // already calls live, and a digest cached just before first pitch would flip
-// that row back to pre-game for up to a minute; a missing event degrades to
+// that row back to pre-game until it expired; a missing event degrades to
 // the scoreless live line instead, which at least has the state right.
 export function digestScoreboard(sbJson) {
   const games = {};
@@ -187,11 +289,12 @@ export function digestScoreboard(sbJson) {
 
 // The team endpoint nulls competitor scores while a game is live; only the
 // league scoreboard carries them (verified 2026-07-03). That scoreboard is the
-// same ~300 KB whichever team asks, so it is digested (above) onto one 60s
-// Cache-API entry per league rather than downloaded again for every followed
-// team that is playing. Worker-side only: the scoreboard never reaches a board,
-// and it is fetched solely while a followed team is actually playing. A failed
-// fetch is not cached; the next live team simply tries again, as each always did.
+// same ~300 KB whichever team asks, so it is digested (above) onto one
+// SCOREBOARD_TTL_S Cache-API entry per league rather than downloaded again for
+// every followed team that is playing. Worker-side only: the scoreboard never
+// reaches a board, and it is fetched solely while a followed team is actually
+// playing. A failed fetch is not cached; the next live team simply tries again,
+// as each always did.
 //
 // useCache is the subrequest budget (see the top of this file). The cached path
 // costs up to 3 (match, fetch, put) against the bare fetch's 1, so it runs only
@@ -199,6 +302,12 @@ export function digestScoreboard(sbJson) {
 // put: another 3). That miss comes once per team per half hour; on that one
 // call the scoreboard is fetched directly and the digest is neither read nor
 // written.
+//
+// SCOREBOARD_TTL_S stacks under the live row's SPORTS_LIVE_S: a score can be
+// that old when a row is assembled from it, so the pair bounds a live score at
+// ~90s old at the worker.
+const SCOREBOARD_TTL_S = 30;
+
 async function cachedLiveComp(origin, lg, eventId, useCache) {
   const cache = caches.default;
   const key = useCache && origin && new Request(`${origin}/__cache/sb/${lg}`);
@@ -226,7 +335,7 @@ async function cachedLiveComp(origin, lg, eventId, useCache) {
   if (!games) return null; // scoreless live line still renders cleanly
   if (key) {
     try {
-      await cache.put(key, new Response(JSON.stringify(games), { headers: { 'Cache-Control': 'max-age=60' } }));
+      await cache.put(key, new Response(JSON.stringify(games), { headers: { 'Cache-Control': `max-age=${SCOREBOARD_TTL_S}` } }));
     } catch {
       // best-effort
     }
@@ -251,12 +360,12 @@ export async function fetchTeamSummary(lg, id, origin) {
   const [team, sched] = await Promise.allSettled([teamP, cachedSchedLines(origin, lg, id, base, teamP)]);
   if (team.status === 'rejected') throw team.reason;
   const teamJson = team.value;
-  const { lastLine, nextLine, fromCache } = sched.value;
+  const { lastLine, nextLine, nextAt, fromCache } = sched.value;
   // Join the live game's scores by event id (see cachedLiveComp).
   let liveComp = null;
   const nextEv = teamJson?.team?.nextEvent?.[0];
   if (nextEv?.competitions?.[0]?.status?.type?.state === 'in') {
     liveComp = await cachedLiveComp(origin, lg, nextEv.id, fromCache);
   }
-  return { row: mapTeamSummary(teamJson, lastLine || null, lg, liveComp, nextLine || null) };
+  return { row: mapTeamSummary(teamJson, lastLine || null, lg, liveComp, nextLine || null, nextAt) };
 }

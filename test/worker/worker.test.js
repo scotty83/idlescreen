@@ -1,7 +1,10 @@
 import { fetchGolf, fetchTennis } from '../../worker/src/scores.js';
 import { runHealthChecks } from '../../worker/src/health.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { digestNext, digestSchedule, digestScoreboard, fetchTeamSummary, mapTeamSummary } from '../../worker/src/sports.js';
+import {
+  digestNext, digestSchedule, digestScoreboard, fetchTeamSummary, mapTeamSummary, nextStartAt, teamFreshS,
+  SPORTS_LIVE_S, SPORTS_IDLE_MAX_S, SPORTS_UNSURE_S,
+} from '../../worker/src/sports.js';
 import { ESPN_UA } from '../../worker/src/espn.js';
 import { env } from 'cloudflare:test';
 import worker, { guardFetch } from '../../worker/src/index.js';
@@ -863,10 +866,10 @@ describe('mapTeamSummary nextLine passthrough', () => {
 const sportsKey = (path) => new Request(`https://api.test/__cache/${path}`);
 const resetTeams = (...ids) => Promise.all([
   caches.default.delete(sportsKey('sb/mlb')),
-  ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched2/mlb:${id}`))]),
+  ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched3/mlb:${id}`))]),
 ]);
 const seedSched = (id) => caches.default.put(
-  sportsKey(`sched2/mlb:${id}`),
+  sportsKey(`sched3/mlb:${id}`),
   new Response(JSON.stringify({ lastLine: null, nextLine: null }), { headers: { 'Cache-Control': 'max-age=600' } }),
 );
 
@@ -1083,7 +1086,7 @@ describe('/sports/team schedule-lines TTL', () => {
       put.mockRestore();
       await resetTeams('10');
     }
-    const [, stored] = calls.find(([req]) => req.url.endsWith('/__cache/sched2/mlb:10'));
+    const [, stored] = calls.find(([req]) => req.url.endsWith('/__cache/sched3/mlb:10'));
     return stored.headers.get('cache-control');
   };
 
@@ -1095,6 +1098,178 @@ describe('/sports/team schedule-lines TTL', () => {
 
   it('keeps a real result for half an hour, even one with no games in it', async () => {
     expect(await schedLinesTtl([{ match: /teams\/10\/schedule$/, body: { events: [] } }])).toBe('max-age=1800');
+  });
+});
+
+// The /sports/team TTL follows the game (teamFreshS in sports.js): a minute
+// while anything can change, up to 15 minutes while nothing can. The long TTL
+// is the one that can hide a first pitch, so most of these pin when it must
+// NOT be given. Dates are ESPN's own shape ("2026-09-24T23:05Z", checked live).
+describe('/sports/team TTL by game state', () => {
+  const NOW = Date.parse('2026-09-25T18:00:00Z');
+  const S = NOW / 1000;
+  const MIN = 60;
+  const ttl = (row) => teamFreshS({ row }, NOW);
+
+  it('a live game lives a minute', () => {
+    expect(ttl({ state: 'in', startsAt: S - 3600, nextStartsAt: S + 86400 })).toBe(SPORTS_LIVE_S);
+    expect(SPORTS_LIVE_S).toBe(60);
+  });
+
+  it('a pre-game row expires at least 10 minutes before first pitch, however early it was cached', () => {
+    // Cached 15 min out: inside the 20-minute window, so it is already live.
+    expect(ttl({ state: 'pre', startsAt: S + 15 * MIN })).toBe(60);
+    for (const out of [15, 21, 25, 30, 45, 120, 600]) {
+      const t = ttl({ state: 'pre', startsAt: S + out * MIN });
+      expect(t).toBeGreaterThanOrEqual(60);
+      expect(t).toBeLessThanOrEqual(900);
+      expect(S + t).toBeLessThanOrEqual(S + (out - 10) * MIN); // gone by start - 10 min
+    }
+    expect(ttl({ state: 'pre', startsAt: S + 25 * MIN })).toBe(15 * MIN); // start - 10 min exactly
+    expect(ttl({ state: 'pre', startsAt: S + 21 * MIN })).toBe(11 * MIN);
+    expect(ttl({ state: 'pre', startsAt: S + 3 * 3600 })).toBe(SPORTS_IDLE_MAX_S);
+    expect(SPORTS_IDLE_MAX_S).toBe(900);
+  });
+
+  it('a game past its start but still pre (a rain delay, a late start) stays live for six hours', () => {
+    expect(ttl({ state: 'pre', startsAt: S - 30 * MIN })).toBe(60);
+    expect(ttl({ state: 'pre', startsAt: S - (6 * 60 - 1) * MIN })).toBe(60);
+  });
+
+  it('a postponed game (pre, dated six hours or more ago) waits on the NEXT game, not its own date', () => {
+    const postponed = { state: 'pre', startsAt: S - 7 * 3600 };
+    expect(ttl({ ...postponed, nextStartsAt: S + 86400 })).toBe(900);
+    expect(ttl({ ...postponed, nextStartsAt: S + 15 * MIN })).toBe(5 * MIN);
+    expect(ttl({ ...postponed, nextStartsAt: null })).toBe(900); // nothing else scheduled
+    expect(ttl(postponed)).toBe(SPORTS_UNSURE_S); // the schedule could not be read
+  });
+
+  it('a final with a doubleheader to come expires ten minutes before game two', () => {
+    const final = { state: 'post', startsAt: S - 3 * 3600 };
+    expect(ttl({ ...final, nextStartsAt: S + 40 * MIN })).toBe(900);
+    expect(ttl({ ...final, nextStartsAt: S + 15 * MIN })).toBe(5 * MIN);
+    expect(ttl({ ...final, nextStartsAt: S + 5 * MIN })).toBe(60); // floored, never 0 or less
+    // Game one ran long past game two's nominal start: game two is due now.
+    expect(ttl({ ...final, nextStartsAt: S - 20 * MIN })).toBe(60);
+  });
+
+  it('an idle row with nothing scheduled lives the maximum; one whose schedule failed never does', () => {
+    expect(ttl({ state: 'post', startsAt: S - 86400, nextStartsAt: null })).toBe(900);
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: null })).toBe(900);
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: S + 2 * 86400 })).toBe(900);
+    expect(ttl({ state: 'post', startsAt: S - 86400 })).toBe(SPORTS_UNSURE_S);
+    expect(ttl({ state: 'none', startsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(SPORTS_UNSURE_S).toBeLessThan(SPORTS_IDLE_MAX_S);
+  });
+
+  it('an unknown state, a missing start or a missing row never gets the long TTL', () => {
+    expect(ttl({ state: 'delayed', startsAt: S + 86400, nextStartsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(ttl({ state: 'pre', startsAt: null, nextStartsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(teamFreshS({ row: null }, NOW)).toBe(SPORTS_UNSURE_S);
+    expect(teamFreshS(undefined, NOW)).toBe(SPORTS_UNSURE_S);
+  });
+
+  it('nextStartAt keeps a doubleheader game two past its nominal time, but not a postponed game', () => {
+    const ev = (date, state) => ({ date, competitions: [{ status: { type: { state } } }] });
+    const sched = { events: [
+      ev('2026-09-24T23:05Z', 'post'),
+      ev('2026-09-25T10:05Z', 'pre'), // 8h ago and still pre: postponed
+      ev('2026-09-25T17:05Z', 'pre'), // 55 min ago and still pre: game two, due
+      ev('2026-09-27T19:20Z', 'pre'),
+    ] };
+    expect(nextStartAt(sched, NOW)).toBe(Date.parse('2026-09-25T17:05Z') / 1000);
+    expect(nextStartAt({ events: [ev('2026-09-25T10:05Z', 'pre'), ev('2026-09-27T19:20Z', 'pre')] }, NOW))
+      .toBe(Date.parse('2026-09-27T19:20Z') / 1000);
+    expect(nextStartAt({ events: [ev('2026-09-24T23:05Z', 'post')] }, NOW)).toBeNull();
+    expect(nextStartAt({}, NOW)).toBeNull();
+  });
+
+  describe('on the route', () => {
+    // ESPN dates carry minutes, not seconds.
+    const iso = (ms) => new Date(ms).toISOString().replace(/:\d\d\.\d{3}Z$/, 'Z');
+    const toMinute = (ms) => Math.floor(ms / 60_000) * 60;
+    const game = (state, startMs, detail) => ({ id: '77', date: iso(startMs), competitions: [{
+      date: iso(startMs),
+      status: { type: { state, shortDetail: detail } },
+      competitors: [
+        { homeAway: 'home', team: { abbreviation: 'NYY' }, score: state === 'pre' ? undefined : { value: 4 } },
+        { homeAway: 'away', team: { abbreviation: 'BOS' }, score: state === 'pre' ? undefined : { value: 2 } },
+      ],
+    }] });
+    const team = (ev) => ({ team: { id: '10', abbreviation: 'NYY', shortDisplayName: 'Yankees', logos: [], nextEvent: ev ? [ev] : [] } });
+    const maxAge = (res) => Number(/max-age=(\d+)/.exec(res.headers.get('cache-control'))[1]);
+    const summary = async (teamBody, schedRoute) => {
+      await resetTeams('10');
+      stubFetch([
+        { match: /teams\/10$/, body: teamBody },
+        { match: /teams\/10\/schedule$/, ...schedRoute },
+        { match: /mlb\/scoreboard$/, body: { events: [] } },
+      ]);
+      const res = await call('/sports/team?lg=mlb&id=10');
+      const { row } = await res.json();
+      await resetTeams('10');
+      return { res, row };
+    };
+
+    it('serves a live row for a minute and an idle one for fifteen, with its start times on the row', async () => {
+      const live = await summary(team(game('in', Date.now() - 3600_000, 'Top 5th')), { body: { events: [] } });
+      expect(live.res.headers.get('cache-control')).toBe('public, max-age=60');
+
+      const started = Date.now() - 4 * 3600_000;
+      const tomorrow = Date.now() + 86400_000;
+      const idle = await summary(team(game('post', started, 'Final')), { body: { events: [game('pre', tomorrow)] } });
+      expect(idle.res.headers.get('cache-control')).toBe('public, max-age=900');
+      // Additive fields the card ignores.
+      expect(idle.row.startsAt).toBe(toMinute(started));
+      expect(idle.row.nextStartsAt).toBe(toMinute(tomorrow));
+    });
+
+    it('holds a final only until ten minutes before a doubleheader\'s game two', async () => {
+      const gameTwo = Date.now() + 25 * 60_000;
+      const { res } = await summary(team(game('post', Date.now() - 3 * 3600_000, 'Final')), { body: { events: [game('pre', gameTwo)] } });
+      // Minute precision moves game two up to 59s earlier, never later.
+      expect(maxAge(res)).toBeLessThanOrEqual(15 * 60);
+      expect(maxAge(res)).toBeGreaterThan(14 * 60);
+    });
+
+    it('never gives an idle row the long TTL when its schedule could not be read', async () => {
+      const { res, row } = await summary(team(game('post', Date.now() - 3 * 3600_000, 'Final')), { body: 'down', status: 503 });
+      expect(res.headers.get('cache-control')).toBe(`public, max-age=${SPORTS_UNSURE_S}`);
+      expect('nextStartsAt' in row).toBe(false); // unknown, not "nothing scheduled"
+    });
+
+    it('stores the next start with the schedule lines, and leaves it off a failure\'s entry', async () => {
+      const stored = async (schedRoute) => {
+        await resetTeams('10');
+        stubFetch([{ match: /teams\/10$/, body: team(null) }, { match: /teams\/10\/schedule$/, ...schedRoute }]);
+        await fetchTeamSummary('mlb', '10', 'https://api.test');
+        const entry = await (await caches.default.match(sportsKey('sched3/mlb:10'))).json();
+        await resetTeams('10');
+        return entry;
+      };
+      const next = Date.now() + 86400_000;
+      expect(await stored({ body: { events: [game('pre', next)] } })).toMatchObject({ nextAt: toMinute(next) });
+      expect(await stored({ body: { events: [] } })).toMatchObject({ nextAt: null }); // known: nothing ahead
+      expect('nextAt' in (await stored({ body: 'down', status: 503 }))).toBe(false); // unknown
+    });
+
+    it('keeps the league scoreboard digest for 30s, so a live score is at most ~90s old at the worker', async () => {
+      await resetTeams('10');
+      await seedSched('10'); // a schedule hit is what lets the scoreboard use its digest
+      stubFetch([
+        { match: /teams\/10$/, body: team(game('in', Date.now() - 3600_000, 'Top 5th')) },
+        { match: /mlb\/scoreboard$/, body: { events: [] } },
+      ]);
+      const put = vi.spyOn(Object.getPrototypeOf(caches.default), 'put');
+      try {
+        await call('/sports/team?lg=mlb&id=10');
+        const [, stored] = put.mock.calls.find(([req]) => req.url.endsWith('/__cache/sb/mlb'));
+        expect(stored.headers.get('cache-control')).toBe('max-age=30');
+      } finally {
+        put.mockRestore();
+        await resetTeams('10');
+      }
+    });
   });
 });
 
@@ -3036,7 +3211,9 @@ describe('route TTLs sit above the card poll interval', () => {
     ['/alerts/subway', 'alerts:subway', any({ entity: [] }), {}, 180], // subway.js 2 min
     ['/alerts/lirr', 'alerts:lirr', any({ entity: [] }), {}, 120], // lirr.js 60s (already 2x)
     ['/alerts/mnr', 'alerts:mnr', any({ entity: [] }), {}, 120], // mnr.js 60s (already 2x)
-    ['/sports/team?lg=mlb&id=nyy', 'sports:mlb:nyy', any(TEAM), {}, 180], // sports.js 2 min
+    // sports.js 2 min. This row is idle (no game, nothing scheduled). A live
+    // row is 60s, UNDER the poll on purpose: see '/sports/team TTL by game state'.
+    ['/sports/team?lg=mlb&id=nyy', 'sports:mlb:nyy', any(TEAM), {}, 900],
     ['/njt/departures', njtKey(), [
       { match: /getToken/, body: TOKEN_RESPONSE, times: 2 },
       { match: /getStation/, body: [], times: 4 },

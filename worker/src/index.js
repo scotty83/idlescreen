@@ -8,7 +8,7 @@ import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
 import { fetchBusStops, parseLegs } from './bus.js';
 import { fetchNewsFeed, newsFeedUrl } from './news.js';
-import { fetchTeamSummary, LEAGUE_PATHS as SPORTS_LEAGUES } from './sports.js';
+import { fetchTeamSummary, teamFreshS, LEAGUE_PATHS as SPORTS_LEAGUES } from './sports.js';
 import { fetchPathRealtime } from './path.js';
 import { fetchFerryDepartures } from './ferry.js';
 import { fetchSubstackPosts } from './posts.js';
@@ -181,7 +181,8 @@ async function ipThrottled(origin, bucket, ip, windowS) {
 // markets watchlist, assembled from quotes a shared map may have held for most
 // of their life) passes a function instead: (digest) => seconds, called once on
 // the fetched digest, so the entry's lifetime can be what is LEFT of its oldest
-// part's rather than a full TTL restarted at assembly.
+// part's rather than a full TTL restarted at assembly. So does a route whose
+// right lifetime depends on what the payload says (a team row: live or idle).
 const STALE_TTL_S = 24 * 3600;
 
 // The floor under a function ttlS: a digest whose parts are all but expired
@@ -787,8 +788,11 @@ const handlers = {
       if (!Object.hasOwn(SPORTS_LEAGUES, lg ?? '') || !/^[a-z0-9]{1,8}$/.test(id)) {
         return json({ error: 'bad_team' }, 400);
       }
-      // 180s ≈ 1.5x the My Teams card's 2-minute poll.
-      return cached(url.origin, `sports:${lg}:${id}`, 180, () => fetchTeamSummary(lg, id, url.origin));
+      // TTL by game state (teamFreshS): 60s while the game is live or about to
+      // start, fresher than the card's 2-minute poll on purpose; up to 15 min
+      // while nothing can change, so boards answer most polls from their own
+      // cache. A failed fetch serves last-good no-store, as every route does.
+      return cached(url.origin, `sports:${lg}:${id}`, teamFreshS, () => fetchTeamSummary(lg, id, url.origin));
     }
 
     const newsMatch = /^\/news\/([a-z0-9-]{1,24})$/.exec(path);
