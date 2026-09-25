@@ -301,14 +301,22 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
   }
 }
 
-// /njt/departures rides cached() like every other feed. 120s is the advisory
+// /njt/departures rides cached() like every other feed. The TTL is the advisory
 // cadence: the alerts half is the dynamic one (the timetable half keeps its own,
-// longer refresh clock inside getNjtSchedule), and it is the same two minutes the
-// alerts used to cache for themselves. 60s of failure backoff, short enough that
-// recovery costs at most one board poll and long enough that a dead NJT is not
-// re-dialed by every board on every refresh.
-const NJT_TTL_S = 120;
+// longer refresh clock inside getNjtSchedule). 180s is ~1.5x the card's 2-minute
+// poll; at 120s the entry expired just before every poll, so a board alone on
+// the route missed about half the time (see the services route for the rule).
+// 60s of failure backoff, short enough that recovery costs at most one board
+// poll and long enough that a dead NJT is not re-dialed by every board on every
+// refresh.
+const NJT_TTL_S = 180;
 const NJT_FAIL_BACKOFF_S = 60;
+
+// Per system, because the cards poll at different rates: Subway Status every
+// 2 minutes (180s ≈ 1.5x), while LIRR and Metro-North fetch their banner on
+// every 60s departures refresh, where 120s is already twice the poll and a
+// shorter TTL would only refetch more often.
+const ALERTS_TTL_S = { subway: 180, lirr: 120, mnr: 120 };
 
 const YAHOO_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -509,15 +517,21 @@ const handlers = {
       // key is sorted so AAPL,MSFT and MSFT,AAPL coalesce to one entry.
       const symbols = [...new Set(requested.length ? requested : DEFAULT_SYMBOLS)];
       const cacheKey = [...symbols].sort().join(',');
-      return cached(url.origin, `markets:${cacheKey}`, 300, () => fetchMarkets(symbols));
+      // 450s ≈ 1.5x the card's 5-minute poll (300s expired on every request).
+      return cached(url.origin, `markets:${cacheKey}`, 450, () => fetchMarkets(symbols));
     }
 
     if (path === '/path/realtime' && request.method === 'GET') {
-      return cached(url.origin, 'path', 30, () => fetchPathRealtime());
+      // 90s ≈ 1.5x the card's 60s poll. Trains ride as projected epochs the card
+      // counts down against its own clock (see path.js), so an older digest still
+      // reads the right minutes; what ages is only the upstream's estimate.
+      return cached(url.origin, 'path', 90, () => fetchPathRealtime());
     }
 
     if (path === '/ferry/departures' && request.method === 'GET') {
-      return cached(url.origin, 'ferry', 60, () => fetchFerryDepartures());
+      // 90s ≈ 1.5x the card's 60s poll; stop times are absolute epochs the card
+      // counts down locally, so an older digest still reads right.
+      return cached(url.origin, 'ferry', 90, () => fetchFerryDepartures());
     }
 
     if (path === '/posts/substack' && request.method === 'GET') {
@@ -541,12 +555,13 @@ const handlers = {
       return cached(url.origin, `svc:${[...ids].sort().join(',')}`, 480, () => fetchServiceStatuses(ids, env), { mend: mendServiceStatuses });
     }
 
+    // Golf and Tennis: 450s ≈ 1.5x the cards' 5-minute poll.
     if (path === '/golf' && request.method === 'GET') {
-      return cached(url.origin, 'golf', 300, () => fetchGolf());
+      return cached(url.origin, 'golf', 450, () => fetchGolf());
     }
 
     if (path === '/tennis' && request.method === 'GET') {
-      return cached(url.origin, 'tennis', 300, () => fetchTennis());
+      return cached(url.origin, 'tennis', 450, () => fetchTennis());
     }
 
     if (path === '/f1' && request.method === 'GET') {
@@ -557,9 +572,11 @@ const handlers = {
 
     if (path === '/amtrak/departures' && request.method === 'GET') {
       // NYP (Moynihan) Amtrak departure board from the keyless Amtraker feed,
-      // filtered to NYP and cached fleet-wide 60s. Filtering by destination is
-      // client-side (each departure carries its downstream stops).
-      return cached(url.origin, 'amtrak', 60, () => fetchAmtrak());
+      // filtered to NYP and cached fleet-wide 90s (≈ 1.5x the card's 60s poll;
+      // departures are absolute epochs the card counts down locally). Filtering
+      // by destination is client-side (each departure carries its downstream
+      // stops).
+      return cached(url.origin, 'amtrak', 90, () => fetchAmtrak());
     }
 
     if (path === '/chart' && request.method === 'GET') {
@@ -597,8 +614,8 @@ const handlers = {
 
     if (path === '/tfl/status' && request.method === 'GET') {
       // One fleet-wide digest of all 19 lines; the widget filters to the chosen
-      // set. 120s matches the Subway card's 2-minute cadence.
-      return cached(url.origin, 'tfl', 120, () => fetchTfl(env));
+      // set. 180s ≈ 1.5x the TfL card's 2-minute poll.
+      return cached(url.origin, 'tfl', 180, () => fetchTfl(env));
     }
 
     if (path === '/gdrive/album' && request.method === 'GET') {
@@ -618,7 +635,8 @@ const handlers = {
 
     const alertsMatch = /^\/alerts\/(subway|lirr|mnr)$/.exec(path);
     if (alertsMatch && request.method === 'GET') {
-      return cached(url.origin, `alerts:${alertsMatch[1]}`, 120, () => fetchMtaAlerts(alertsMatch[1]));
+      const system = alertsMatch[1];
+      return cached(url.origin, `alerts:${system}`, ALERTS_TTL_S[system], () => fetchMtaAlerts(system));
     }
 
     if (path === '/sports/team' && request.method === 'GET') {
@@ -629,7 +647,8 @@ const handlers = {
       if (!Object.hasOwn(SPORTS_LEAGUES, lg ?? '') || !/^[a-z0-9]{1,8}$/.test(id)) {
         return json({ error: 'bad_team' }, 400);
       }
-      return cached(url.origin, `sports:${lg}:${id}`, 120, () => fetchTeamSummary(lg, id, url.origin));
+      // 180s ≈ 1.5x the My Teams card's 2-minute poll.
+      return cached(url.origin, `sports:${lg}:${id}`, 180, () => fetchTeamSummary(lg, id, url.origin));
     }
 
     const newsMatch = /^\/news\/([a-z0-9-]{1,24})$/.exec(path);

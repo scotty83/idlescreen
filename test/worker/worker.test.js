@@ -299,7 +299,8 @@ describe('/njt/departures', () => {
     expect(res.status).toBe(200);
     // It rides cached() like every other feed now, so a board finally gets a
     // Cache-Control it can act on instead of hitting origin on every poll.
-    expect(res.headers.get('cache-control')).toBe('public, max-age=120');
+    // 180s ≈ 1.5x the card's 2-minute poll (see the route-TTL sweep below).
+    expect(res.headers.get('cache-control')).toBe('public, max-age=180');
     const body = await res.json();
     expect(body.station).toBe('NY');
     expect(body.stale).toBe(false);
@@ -1131,7 +1132,7 @@ describe('/path/realtime', () => {
     const body = await res.json();
     expect(body.stations['33S'].ToNJ).toHaveLength(2);
     const before = calls.length;
-    await call('/path/realtime'); // Cache API hit inside the 30 s TTL
+    await call('/path/realtime'); // Cache API hit inside the 90 s TTL
     expect(calls.length).toBe(before);
   });
 });
@@ -2384,6 +2385,54 @@ describe('every feed route carries the digest envelope', () => {
     // The value of the sweep is that it is exhaustive: a feed route added
     // without a row above would otherwise slip past it in silence.
     expect(ROUTES).toHaveLength([...WORKER_SOURCE.matchAll(/cached\(url\.origin,/g)].length);
+  });
+});
+
+// A TTL at or under the card's poll interval expires just before every poll:
+// the board's scheduler awaits the fetch, THEN waits interval ±15%, so a board
+// alone on a route found the entry gone about half the time and every one of
+// those polls cost an upstream fetch. Each row is a route, its cache key, the
+// least upstream that gets a 200, and the TTL it must advertise: ~1.5x the
+// poller's meta.refreshMs (named per row; the widget files are the source).
+describe('route TTLs sit above the card poll interval', () => {
+  const YAHOO = { chart: { result: [{
+    meta: { symbol: 'AAPL', regularMarketPrice: 200, chartPreviousClose: 190 },
+    timestamp: [1, 2], indicators: { quote: [{ close: [190, 200] }] },
+  }] } };
+  const FERRY = GtfsRt.transit_realtime.FeedMessage.encode(
+    GtfsRt.transit_realtime.FeedMessage.create({
+      header: { gtfsRealtimeVersion: '2.0', timestamp: 1783123914 }, entity: [],
+    }),
+  ).finish();
+  const TEAM = { team: { abbreviation: 'NYY', shortDisplayName: 'Yankees', record: { items: [{ summary: '48-37' }] }, nextEvent: [] } };
+  const any = (body, extra = {}) => [{ match: /./, body, times: 12, ...extra }];
+
+  const TTLS = [
+    // [path, cache key, upstream, env, TTL] — poller and its refreshMs alongside
+    ['/amtrak/departures', 'amtrak', any({}), {}, 90], // amtrak.js 60s
+    ['/ferry/departures', 'ferry', any(FERRY, { raw: true }), {}, 90], // ferry.js 60s
+    ['/path/realtime', 'path', any({}), {}, 90], // path.js 60s
+    ['/markets?symbols=aapl', 'markets:AAPL', any(YAHOO), {}, 450], // markets.js 5 min
+    ['/golf', 'golf', any({}), {}, 450], // golf.js 5 min
+    ['/tennis', 'tennis', any({}), {}, 450], // tennis.js 5 min
+    ['/tfl/status', 'tfl', any([]), {}, 180], // tfl.js 2 min
+    ['/alerts/subway', 'alerts:subway', any({ entity: [] }), {}, 180], // subway.js 2 min
+    ['/alerts/lirr', 'alerts:lirr', any({ entity: [] }), {}, 120], // lirr.js 60s (already 2x)
+    ['/alerts/mnr', 'alerts:mnr', any({ entity: [] }), {}, 120], // mnr.js 60s (already 2x)
+    ['/sports/team?lg=mlb&id=nyy', 'sports:mlb:nyy', any(TEAM), {}, 180], // sports.js 2 min
+    ['/njt/departures', njtKey(), [
+      { match: /getToken/, body: TOKEN_RESPONSE, times: 2 },
+      { match: /getStation/, body: [], times: 4 },
+    ], NJT_ENV, 180], // njt.js 2 min
+  ];
+
+  it.each(TTLS)('%s', async (path, key, routes, extraEnv, ttl) => {
+    await clearCache(key);
+    stubFetch(routes);
+    const res = await call(path, {}, extraEnv);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe(`public, max-age=${ttl}`);
+    await clearCache(key);
   });
 });
 
