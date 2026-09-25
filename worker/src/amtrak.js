@@ -3,7 +3,7 @@
 // keep those departing NYP in the future, and return a slim digest; each
 // departure carries its downstream stops so the widget can filter by
 // destination client-side. Amtraker isn't built for direct browser calls and
-// returns a large payload -> worker-proxied + fleet-cached (Cache API, 60s).
+// returns a large payload -> worker-proxied + fleet-cached (Cache API, 90s).
 const V3_TRAINS = 'https://api.amtraker.com/v3/trains';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 const NYP = 'NYP';

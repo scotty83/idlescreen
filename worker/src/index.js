@@ -3,6 +3,7 @@
 // nothing served here is sensitive, and the boards fetch from a static origin.
 
 import { mapYahooChart } from './markets.js';
+import { sharedMapGet } from './sharedmap.js';
 import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
 import { fetchBusStops, parseLegs } from './bus.js';
@@ -175,7 +176,22 @@ async function ipThrottled(origin, bucket, ip, windowS) {
 // falling back to a longer-lived stale copy (flagged stale) when upstream fails.
 // Keys live under the worker's own origin so put() stays same-zone; a second
 // day-long entry survives past ttlS to serve as that stale backup.
+//
+// ttlS is normally a number. A route whose payload can be born part-aged (the
+// markets watchlist, assembled from quotes a shared map may have held for most
+// of their life) passes a function instead: (digest) => seconds, called once on
+// the fetched digest, so the entry's lifetime can be what is LEFT of its oldest
+// part's rather than a full TTL restarted at assembly.
 const STALE_TTL_S = 24 * 3600;
+
+// The floor under a function ttlS: a digest whose parts are all but expired
+// still caches for a second, never for 0 or less (an unusable max-age). It is
+// also the hit path's answer when a function route's entry lacks its stamp.
+const MIN_FRESH_S = 1;
+
+// Whole seconds, rounded like the hit path's remainder, never under the floor;
+// a non-number (a digest missing what the function reads) gets the floor too.
+const freshSeconds = (s) => (Number.isFinite(s) ? Math.max(MIN_FRESH_S, Math.round(s)) : MIN_FRESH_S);
 
 // Stamped on every cache entry so a hit can advertise its REMAINING freshness
 // (see below) instead of restarting the clock on the board.
@@ -214,8 +230,11 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
     // a board that caches for a full TTL on top of a nearly-expired colo copy
     // would show data ~2x the intended age, which on a departure board reads as
     // wrong minutes rather than as stale.
+    // Every entry written below carries the stamp; the fallback is for one that
+    // somehow does not, and a function ttlS has no digest here to be asked with.
     const until = Number(hit.headers.get(FRESH_UNTIL));
-    const remaining = until > 0 ? Math.max(0, Math.round((until - Date.now()) / 1000)) : ttlS;
+    const fallbackS = typeof ttlS === 'function' ? MIN_FRESH_S : ttlS;
+    const remaining = until > 0 ? Math.max(0, Math.round((until - Date.now()) / 1000)) : fallbackS;
     return new Response(hit.body, {
       headers: {
         'Content-Type': 'application/json',
@@ -271,7 +290,11 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
     // 2026-08-02: a seconds-long Jolpica flake became an HOUR of a drivers-only
     // F1 card on every board behind that colo, because the partial digest was
     // cached at the route's full 3600s.
-    const freshTtl = fresh?.partial ? Math.min(ttlS, 120) : ttlS;
+    //
+    // A function ttlS is resolved here, once, on the digest actually being
+    // served (after any mend), and floored at MIN_FRESH_S.
+    const ttl = typeof ttlS === 'function' ? freshSeconds(ttlS(fresh)) : ttlS;
+    const freshTtl = fresh?.partial ? Math.min(ttl, 120) : ttl;
     try {
       // A `partial` payload (some upstreams failed) is fine to serve fresh, but
       // must NOT overwrite the complete 24h stale backup.
@@ -301,65 +324,129 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
   }
 }
 
-// /njt/departures rides cached() like every other feed. 120s is the advisory
+// /njt/departures rides cached() like every other feed. The TTL is the advisory
 // cadence: the alerts half is the dynamic one (the timetable half keeps its own,
-// longer refresh clock inside getNjtSchedule), and it is the same two minutes the
-// alerts used to cache for themselves. 60s of failure backoff, short enough that
-// recovery costs at most one board poll and long enough that a dead NJT is not
-// re-dialed by every board on every refresh.
-const NJT_TTL_S = 120;
+// longer refresh clock inside getNjtSchedule). 180s is ~1.5x the card's 2-minute
+// poll; at 120s the entry expired just before every poll, so a board alone on
+// the route missed about half the time (see the services route for the rule).
+// 60s of failure backoff, short enough that recovery costs at most one board
+// poll and long enough that a dead NJT is not re-dialed by every board on every
+// refresh.
+const NJT_TTL_S = 180;
 const NJT_FAIL_BACKOFF_S = 60;
+
+// Per system, because the cards poll at different rates: Subway Status every
+// 2 minutes (180s ≈ 1.5x), while LIRR and Metro-North fetch their banner on
+// every 60s departures refresh, where 120s is already twice the poll and a
+// shorter TTL would only refetch more often.
+const ALERTS_TTL_S = { subway: 180, lirr: 120, mnr: 120 };
 
 const YAHOO_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 const INDEX_NAMES = { '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^GSPC': 'S&P 500' };
 const DEFAULT_SYMBOLS = Object.keys(INDEX_NAMES);
 
-async function fetchMarkets(symbols) {
+// /markets TTL: 450s ≈ 1.5x the card's 5-minute poll (300s expired on every
+// request). It is one QUOTE's whole fresh life, counted from its Yahoo fetch:
+// the shared quote map below reuses a quote for that long, and a watchlist
+// entry built from it may serve it fresh only for what is left (marketsFreshS).
+// Without that second half, a list assembled at t=449 around a quote fetched at
+// t=0 restarted the clock and served the t=0 quote as fresh until t=899.
+const MARKETS_TTL_S = 450;
+
+// The oldest included quote's fetch time in ms, riding on the digest under a
+// symbol key: JSON.stringify skips symbol keys, so the served body is unchanged,
+// while stamped()'s spread copies it through to marketsFreshS. updatedAt is the
+// same instant floored to whole seconds, too coarse here: a watchlist fetched
+// entirely in this request would read as up to a second old and cache for 449s
+// or 450s at random.
+const OLDEST_QUOTE_MS = Symbol('oldest quote fetchedAt (ms)');
+
+// cached()'s ttlS for /markets: what remains of the oldest quote's fresh life
+// (cached() rounds it and floors it at MIN_FRESH_S). updatedAt is the fallback
+// should the symbol ever be lost on the way (a mend() would build a new object).
+const marketsFreshS = (digest) => {
+  const oldestMs = digest[OLDEST_QUOTE_MS] ?? digest.updatedAt * 1000;
+  return Math.min(MARKETS_TTL_S, (oldestMs + MARKETS_TTL_S * 1000 - Date.now()) / 1000);
+};
+
+// Fleet-wide per-symbol layer under the per-watchlist cached() entry (see
+// sharedmap.js). The route caches per whole sorted watchlist, so before this a
+// symbol common to many watchlists was refetched from Yahoo once per distinct
+// list; now each symbol is fetched at most once per MARKETS_TTL_S per colo, and
+// so is its zero-change daily-bars fallback. 200 entries at ~1.5 KB a quote
+// (the sparklines) keeps the parse and re-serialize well inside the CPU budget.
+const MARKETS_MAP = 'mkt:quotes';
+const MARKETS_MAP_MAX = 200;
+
+// One symbol, one or two Yahoo subrequests. Throws on a failed chart fetch or a
+// malformed payload; the daily-bars fallback never throws.
+async function fetchQuote(symbol) {
+  // 2d, not 1d: once a foreign market closes, Yahoo rolls the session into
+  // chartPreviousClose (price === prev → the card showed 0.00 daily change
+  // for LSE tickers all evening). With two days of bars, mapYahooChart
+  // takes the daily baseline from the prior session's last close itself.
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2d&interval=15m`;
+  const res = await fetch(url, { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`yahoo ${res.status}`);
+  const out = mapYahooChart(await res.json(), INDEX_NAMES[symbol]);
+  // Yahoo doesn't reliably honor range=2d from Cloudflare egress (it can
+  // return a single session with the close already rolled — change 0.00),
+  // even though the same request from a browser gets two days. When the
+  // change computes to zero, pull the true prior close from a tiny
+  // daily-bars request; a genuinely flat day just recomputes to zero.
+  if (out.change === 0) {
+    try {
+      const r2 = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`,
+        { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) },
+      );
+      if (r2.ok) {
+        const daily = ((await r2.json())?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [])
+          .filter(Number.isFinite);
+        const prior = daily.length >= 2 ? daily[daily.length - 2] : null;
+        if (Number.isFinite(prior) && prior !== 0) {
+          out.change = out.price - prior;
+          out.changePct = ((out.price - prior) / prior) * 100;
+        }
+      }
+    } catch { /* keep the zero-change mapping */ }
+  }
+  return out;
+}
+
+// Subrequest budget for one /markets miss, worst case (Free plan: 50, fetch()
+// and Cache API calls counted together):
+//   cached(): fresh match                                   1
+//   quote map: match                                        1
+//   20 symbols (the route cap) x chart + daily-bars        40
+//   quote map: put                                          1
+//   cached(): fresh put + stale put                         2
+//                                                         ----
+//                                                          45
+// A total wipeout instead costs 1 + 1 + 20 + the stale match = 23. Raising the
+// symbol cap past 20 breaks this budget: re-count before touching it.
+async function fetchMarkets(origin, symbols) {
   // One unresolvable symbol shouldn't 502 the whole batch (and, without a
   // negative cache, re-hit Yahoo for the good symbols on every retry). Drop
   // the failures; only a total wipeout throws (so cached() serves stale/502).
-  const settled = await Promise.allSettled(
-    symbols.map(async (symbol) => {
-      // 2d, not 1d: once a foreign market closes, Yahoo rolls the session into
-      // chartPreviousClose (price === prev → the card showed 0.00 daily change
-      // for LSE tickers all evening). With two days of bars, mapYahooChart
-      // takes the daily baseline from the prior session's last close itself.
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2d&interval=15m`;
-      const res = await fetch(url, { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`yahoo ${res.status}`);
-      const out = mapYahooChart(await res.json(), INDEX_NAMES[symbol]);
-      // Yahoo doesn't reliably honor range=2d from Cloudflare egress (it can
-      // return a single session with the close already rolled — change 0.00),
-      // even though the same request from a browser gets two days. When the
-      // change computes to zero, pull the true prior close from a tiny
-      // daily-bars request; a genuinely flat day just recomputes to zero.
-      if (out.change === 0) {
-        try {
-          const r2 = await fetch(
-            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`,
-            { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) },
-          );
-          if (r2.ok) {
-            const daily = ((await r2.json())?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [])
-              .filter(Number.isFinite);
-            const prior = daily.length >= 2 ? daily[daily.length - 2] : null;
-            if (Number.isFinite(prior) && prior !== 0) {
-              out.change = out.price - prior;
-              out.changePct = ((out.price - prior) / prior) * 100;
-            }
-          }
-        } catch { /* keep the zero-change mapping */ }
-      }
-      return out;
-    }),
-  );
-  const indices = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
-  if (!indices.length) throw new Error('yahoo: all symbols failed');
+  const quotes = await sharedMapGet(origin, MARKETS_MAP, symbols, async (missing) => {
+    const settled = await Promise.allSettled(missing.map(fetchQuote));
+    return new Map(missing.flatMap((symbol, i) => (settled[i].status === 'fulfilled' ? [[symbol, settled[i].value]] : [])));
+  }, { freshS: MARKETS_TTL_S, maxEntries: MARKETS_MAP_MAX });
+  const held = symbols.filter((s) => quotes.has(s)).map((s) => quotes.get(s));
+  if (!held.length) throw new Error('yahoo: all symbols failed');
+  const indices = held.map((q) => q.value);
   // Mark an incomplete batch so cached() won't promote it over a complete 24h
   // stale backup (a later total outage should serve the full list, not this).
   const partial = indices.length < symbols.length;
-  return { indices, ...(partial && { partial: true }) };
+  // "as of" is the OLDEST quote's fetch time, not this assembly's: a watchlist
+  // built partly from the shared map can carry a quote fetched up to
+  // MARKETS_TTL_S ago, and the card prints this stamp as its clock. The same
+  // instant, unrounded, bounds how long cached() keeps the list fresh.
+  const oldestMs = Math.min(...held.map((q) => q.fetchedAt));
+  const updatedAt = Math.floor(oldestMs / 1000);
+  return { updatedAt, indices, ...(partial && { partial: true }), [OLDEST_QUOTE_MS]: oldestMs };
 }
 
 // In-process dispatcher for the health monitor. A Worker fetching its OWN
@@ -503,21 +590,28 @@ const handlers = {
         // Matches the config cap (site/js/config.js, TICKER_MAX in
         // settings/pickers.js): a board may follow 20 tickers and the expand
         // overlay shows all of them, so all 20 must be fetched. Each symbol is
-        // one Yahoo subrequest, well inside the Workers per-request limit.
+        // up to two Yahoo subrequests; see fetchMarkets for the whole budget.
         .slice(0, 20);
       // Dedupe for the fetch, but keep request order for display; the cache
       // key is sorted so AAPL,MSFT and MSFT,AAPL coalesce to one entry.
       const symbols = [...new Set(requested.length ? requested : DEFAULT_SYMBOLS)];
       const cacheKey = [...symbols].sort().join(',');
-      return cached(url.origin, `markets:${cacheKey}`, 300, () => fetchMarkets(symbols));
+      // The entry's fresh lifetime is its oldest quote's remaining one, not a
+      // full MARKETS_TTL_S from assembly (see MARKETS_TTL_S).
+      return cached(url.origin, `markets:${cacheKey}`, marketsFreshS, () => fetchMarkets(url.origin, symbols));
     }
 
     if (path === '/path/realtime' && request.method === 'GET') {
-      return cached(url.origin, 'path', 30, () => fetchPathRealtime());
+      // 90s ≈ 1.5x the card's 60s poll. Trains ride as projected epochs the card
+      // counts down against its own clock (see path.js), so an older digest still
+      // reads the right minutes; what ages is only the upstream's estimate.
+      return cached(url.origin, 'path', 90, () => fetchPathRealtime());
     }
 
     if (path === '/ferry/departures' && request.method === 'GET') {
-      return cached(url.origin, 'ferry', 60, () => fetchFerryDepartures());
+      // 90s ≈ 1.5x the card's 60s poll; stop times are absolute epochs the card
+      // counts down locally, so an older digest still reads right.
+      return cached(url.origin, 'ferry', 90, () => fetchFerryDepartures());
     }
 
     if (path === '/posts/substack' && request.method === 'GET') {
@@ -541,12 +635,13 @@ const handlers = {
       return cached(url.origin, `svc:${[...ids].sort().join(',')}`, 480, () => fetchServiceStatuses(ids, env), { mend: mendServiceStatuses });
     }
 
+    // Golf and Tennis: 450s ≈ 1.5x the cards' 5-minute poll.
     if (path === '/golf' && request.method === 'GET') {
-      return cached(url.origin, 'golf', 300, () => fetchGolf());
+      return cached(url.origin, 'golf', 450, () => fetchGolf());
     }
 
     if (path === '/tennis' && request.method === 'GET') {
-      return cached(url.origin, 'tennis', 300, () => fetchTennis());
+      return cached(url.origin, 'tennis', 450, () => fetchTennis());
     }
 
     if (path === '/f1' && request.method === 'GET') {
@@ -557,9 +652,11 @@ const handlers = {
 
     if (path === '/amtrak/departures' && request.method === 'GET') {
       // NYP (Moynihan) Amtrak departure board from the keyless Amtraker feed,
-      // filtered to NYP and cached fleet-wide 60s. Filtering by destination is
-      // client-side (each departure carries its downstream stops).
-      return cached(url.origin, 'amtrak', 60, () => fetchAmtrak());
+      // filtered to NYP and cached fleet-wide 90s (≈ 1.5x the card's 60s poll;
+      // departures are absolute epochs the card counts down locally). Filtering
+      // by destination is client-side (each departure carries its downstream
+      // stops).
+      return cached(url.origin, 'amtrak', 90, () => fetchAmtrak());
     }
 
     if (path === '/chart' && request.method === 'GET') {
@@ -597,8 +694,8 @@ const handlers = {
 
     if (path === '/tfl/status' && request.method === 'GET') {
       // One fleet-wide digest of all 19 lines; the widget filters to the chosen
-      // set. 120s matches the Subway card's 2-minute cadence.
-      return cached(url.origin, 'tfl', 120, () => fetchTfl(env));
+      // set. 180s ≈ 1.5x the TfL card's 2-minute poll.
+      return cached(url.origin, 'tfl', 180, () => fetchTfl(env));
     }
 
     if (path === '/gdrive/album' && request.method === 'GET') {
@@ -618,7 +715,8 @@ const handlers = {
 
     const alertsMatch = /^\/alerts\/(subway|lirr|mnr)$/.exec(path);
     if (alertsMatch && request.method === 'GET') {
-      return cached(url.origin, `alerts:${alertsMatch[1]}`, 120, () => fetchMtaAlerts(alertsMatch[1]));
+      const system = alertsMatch[1];
+      return cached(url.origin, `alerts:${system}`, ALERTS_TTL_S[system], () => fetchMtaAlerts(system));
     }
 
     if (path === '/sports/team' && request.method === 'GET') {
@@ -629,7 +727,8 @@ const handlers = {
       if (!Object.hasOwn(SPORTS_LEAGUES, lg ?? '') || !/^[a-z0-9]{1,8}$/.test(id)) {
         return json({ error: 'bad_team' }, 400);
       }
-      return cached(url.origin, `sports:${lg}:${id}`, 120, () => fetchTeamSummary(lg, id, url.origin));
+      // 180s ≈ 1.5x the My Teams card's 2-minute poll.
+      return cached(url.origin, `sports:${lg}:${id}`, 180, () => fetchTeamSummary(lg, id, url.origin));
     }
 
     const newsMatch = /^\/news\/([a-z0-9-]{1,24})$/.exec(path);

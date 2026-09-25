@@ -1,7 +1,7 @@
 // PATH departures from the Port Authority's RidePATH JSON feed. The raw feed
 // (~10 KB) is verbose; boards get a slim per-station digest. Times are
 // projected epochs (fetch time + secondsToArrival) so boards recompute
-// minutes client-side and the 30 s cache window never skews them.
+// minutes client-side and the route's cache window never skews them.
 
 const FEED = 'https://www.panynj.gov/bin/portauthority/ridepath.json';
 
