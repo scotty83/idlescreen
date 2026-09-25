@@ -466,7 +466,7 @@ const RETRY_PAUSE_MS = 250;
 // the browser aborts the request so the entire card fails instead of showing the
 // providers that DID answer. Two mechanisms hold the budget: fetchJson is handed
 // the remaining time so it shrinks each attempt's timeout and skips a retry it
-// can't afford, and fetchServiceStatuses abandons any provider still running at
+// can't afford, and fetchServiceRows abandons any provider still running at
 // the deadline (its row goes unknown, which marks the digest partial).
 export const SVC_DEADLINE_MS = 12000; // under 13s, leaving margin for serialize + cache writes
 const MIN_ATTEMPT_MS = 1200; // don't open an attempt (or retry) with less budget than this
@@ -615,7 +615,9 @@ async function fetchGraphHealth(env) {
 
 // env is optional: every caller that predates the tenant source (and every test
 // that maps a fixture) may leave it off, and without it the Graph source is
-// simply never reached.
+// simply never reached. Resolves to the mapped row alone ({state, note,
+// incidents, ...}); serviceDigest adds the id and label, so the shared row map
+// in index.js stores nothing a deploy could rename underneath it.
 async function fetchOne(id, env, deadline = Infinity) {
   const svc = SERVICES[id];
   if (svc.adapter === 'm365') {
@@ -625,7 +627,7 @@ async function fetchOne(id, env, deadline = Infinity) {
     // tenant that is misconfigured or mid-outage costs the fallback no latency.
     // The public feeds honour the route deadline; the optional Graph call keeps
     // its own (shorter) internal timeouts and is capped by the withDeadline guard
-    // in fetchServiceStatuses rather than threaded through here.
+    // in fetchServiceRows rather than threaded through here.
     const [consumer, mirror, graph] = await Promise.all([
       ...svc.urls.map((u) => fetchJson(u, { deadline }).catch((e) => {
         console.warn(`[svcstatus] m365 source failed (${u}): ${String(e?.message ?? e)}`);
@@ -639,18 +641,18 @@ async function fetchOne(id, env, deadline = Infinity) {
         return null;
       }) : null,
     ]);
-    return { id, label: svc.label, ...mapM365(consumer, mirror, Date.now(), graph) };
+    return mapM365(consumer, mirror, Date.now(), graph);
   }
   const json = await fetchJson(svc.url, { binary: svc.adapter === 'aws', deadline });
-  return { id, label: svc.label, ...MAPPERS[svc.adapter](json, Date.now()) };
+  return MAPPERS[svc.adapter](json, Date.now());
 }
 
 // Abandon a provider still running when the overall route budget lapses, so one
 // slow or hung source can't hold the digest past the health probe's deadline. The
-// loser settles as a rejection, which fetchServiceStatuses reads as an unknown
-// row (and thus a partial digest); the orphaned fetch is cut with the request
-// context. This is the backstop under fetchJson's own budget-aware timeouts, and
-// the only cap on the optional Graph tenant call.
+// loser settles as a rejection, which fetchServiceRows leaves out, so it reads
+// as an unknown row (and thus a partial digest); the orphaned fetch is cut with
+// the request context. This is the backstop under fetchJson's own budget-aware
+// timeouts, and the only cap on the optional Graph tenant call.
 function withDeadline(promise, deadline) {
   const ms = deadline - Date.now();
   if (ms <= 0) return Promise.reject(new Error('service deadline exceeded'));
@@ -659,13 +661,30 @@ function withDeadline(promise, deadline) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
-export async function fetchServiceStatuses(ids, env) {
-  // One shared deadline for the whole fan-out (not per provider), so N slow
-  // providers can't each spend the full budget in series behind Promise.allSettled.
-  const deadline = Date.now() + SVC_DEADLINE_MS;
+// Fetch and map each provider, all at once. Resolves to a Map of id -> mapped
+// row for every provider that ANSWERED, including one whose mapper could only
+// say 'unknown'; a provider that threw, or was still running at the deadline, is
+// simply absent. Never rejects.
+//
+// One shared deadline for the whole fan-out (not per provider), so N slow
+// providers can't each spend the full budget in series behind Promise.allSettled.
+// The route passes its own, started before its cache reads, so those count too.
+export async function fetchServiceRows(ids, env, deadline = Date.now() + SVC_DEADLINE_MS) {
   const settled = await Promise.allSettled(ids.map((id) => withDeadline(fetchOne(id, env, deadline), deadline)));
-  const services = settled.map((s, i) => (s.status === 'fulfilled' ? s.value
-    : { id: ids[i], label: SERVICES[ids[i]].label, state: 'unknown', note: 'Status unavailable', incidents: [] }))
+  const rows = new Map();
+  settled.forEach((s, i) => { if (s.status === 'fulfilled') rows.set(ids[i], s.value); });
+  return rows;
+}
+
+// The digest the board reads, in the order the ids were asked for. rowOf(id)
+// returns that provider's mapped row, or nothing when there is none to show,
+// which renders as the unknown row.
+export function serviceDigest(ids, rowOf) {
+  const services = ids.map((id) => {
+    const row = rowOf(id);
+    return row ? { id, label: SERVICES[id].label, ...row }
+      : { id, label: SERVICES[id].label, state: 'unknown', note: 'Status unavailable', incidents: [] };
+  })
     // An unknown row ALWAYS says why. The card prints .svc__note in amber under
     // an unknown state, so a mapper that returned a blank note (an unrecognized
     // schema used to) drew an empty amber line and told the reader nothing.
@@ -690,6 +709,12 @@ export const MEND_MAX_AGE_S = 3600;
 // whole card of grey because one provider bounced is a worse lie than a row
 // that is one poll behind. Keeps partial: true (short cache, never overwrites
 // the backup it borrowed from) and adds mended: true for diagnosability.
+//
+// The age is the backup's updatedAt, applied to every row in it, which is only
+// honest because the route stamps a digest with its OLDEST row's fetch time
+// (rows come from a shared map and may be up to a TTL older than the digest
+// that carries them; see fetchServices in index.js). Stamping the assembly time
+// instead would let a row past MEND_MAX_AGE_S slip through by up to that TTL.
 export function mendServiceStatuses(fresh, stale) {
   const age = Math.floor(Date.now() / 1000) - Number(stale?.updatedAt);
   if (!Number.isFinite(age) || age > MEND_MAX_AGE_S) return fresh;
