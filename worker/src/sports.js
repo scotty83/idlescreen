@@ -101,9 +101,9 @@ export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine
 }
 
 // The schedule payload runs ~2 MB and its lines change a few times a day,
-// but the /sports/team summary is only 120s-cached (for live scores). Cache
+// but the /sports/team summary is only 180s-cached (for live scores). Cache
 // the digested last-game + next-game lines on their own 30-min Cache-API
-// entry so the heavy schedule isn't re-downloaded every 120s per team.
+// entry so the heavy schedule isn't re-downloaded every 180s per team.
 // (Key is sched2 — the old sched entries carried lastLine only.)
 //
 // The key needs only lg and id, so this runs alongside the team fetch rather
