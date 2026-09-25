@@ -846,6 +846,18 @@ describe('mapTeamSummary nextLine passthrough', () => {
   });
 });
 
+// sports.js keeps two Cache-API entries of its own beside cached()'s: the
+// per-team schedule lines and the per-league scoreboard digest.
+const sportsKey = (path) => new Request(`https://api.test/__cache/${path}`);
+const resetTeams = (...ids) => Promise.all([
+  caches.default.delete(sportsKey('sb/mlb')),
+  ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched2/mlb:${id}`))]),
+]);
+const seedSched = (id) => caches.default.put(
+  sportsKey(`sched2/mlb:${id}`),
+  new Response(JSON.stringify({ lastLine: null, nextLine: null }), { headers: { 'Cache-Control': 'max-age=600' } }),
+);
+
 describe('/sports/team live scores', () => {
   const TEAM_LIVE = { team: {
     id: '10', abbreviation: 'NYY', shortDisplayName: 'Yankees',
@@ -883,18 +895,6 @@ describe('/sports/team live scores', () => {
       ],
     }] },
   ] };
-
-  // sports.js keeps two Cache-API entries of its own beside cached()'s: the
-  // per-team schedule lines and the per-league scoreboard digest.
-  const sportsKey = (path) => new Request(`https://api.test/__cache/${path}`);
-  const resetTeams = (...ids) => Promise.all([
-    caches.default.delete(sportsKey('sb/mlb')),
-    ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched2/mlb:${id}`))]),
-  ]);
-  const seedSched = (id) => caches.default.put(
-    sportsKey(`sched2/mlb:${id}`),
-    new Response(JSON.stringify({ lastLine: null, nextLine: null }), { headers: { 'Cache-Control': 'max-age=600' } }),
-  );
 
   it('joins live scores from the league scoreboard by event id', async () => {
     await resetTeams('10');
@@ -998,6 +998,60 @@ describe('/sports/team live scores', () => {
       expect(await caches.default.match(sportsKey('sb/mlb'))).toBeTruthy();
       await resetTeams('10');
     });
+  });
+});
+
+describe('/sports/team team and schedule in parallel', () => {
+  const TEAM = { team: { id: '10', abbreviation: 'NYY', shortDisplayName: 'Yankees', logos: [], nextEvent: [] } };
+  // The schedule names its own team at the top level, as ESPN's does.
+  const SCHED = { team: { id: '10', abbreviation: 'NYY' }, events: [{ competitions: [{
+    status: { type: { state: 'post', shortDetail: 'Final' } },
+    competitors: [
+      { homeAway: 'home', team: { abbreviation: 'NYY' }, score: { value: 5 } },
+      { homeAway: 'away', team: { abbreviation: 'TOR' }, score: { value: 2 } },
+    ],
+  }] }] };
+
+  it('starts the schedule download alongside the team fetch, not after it', async () => {
+    // The team answer is held until the schedule is requested, or 200ms pass:
+    // run in sequence, the order below comes out team, team, schedule.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; setTimeout(resolve, 200); });
+    const order = [];
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (/teams\/10$/.test(url)) {
+        order.push('team requested');
+        await gate;
+        order.push('team answered');
+        return Response.json(TEAM);
+      }
+      if (/teams\/10\/schedule$/.test(url)) {
+        order.push('schedule requested');
+        release();
+        return Response.json(SCHED);
+      }
+      throw new Error(`unmocked fetch: ${url}`);
+    }));
+    const { row } = await fetchTeamSummary('mlb', '10', null);
+    expect(order).toEqual(['team requested', 'schedule requested', 'team answered']);
+    expect(row.lastLine).toBe('W 5-2 vs TOR · Final');
+  });
+
+  it('still throws on a failed team fetch, and caches the schedule it already downloaded', async () => {
+    await resetTeams('10');
+    stubFetch([
+      { match: /teams\/10$/, body: 'down', status: 503 },
+      { match: /teams\/10\/schedule$/, body: SCHED },
+    ]);
+    await expect(fetchTeamSummary('mlb', '10', 'https://api.test')).rejects.toThrow('espn team 503');
+
+    // Digested against the schedule's own team, so the next call reads it
+    // back instead of downloading the schedule again (no stub for it now).
+    stubFetch([{ match: /teams\/10$/, body: TEAM }]);
+    const { row } = await fetchTeamSummary('mlb', '10', 'https://api.test');
+    expect(row.lastLine).toBe('W 5-2 vs TOR · Final');
+    await resetTeams('10');
   });
 });
 

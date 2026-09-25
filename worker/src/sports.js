@@ -105,14 +105,22 @@ export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine
 // the digested last-game + next-game lines on their own 30-min Cache-API
 // entry so the heavy schedule isn't re-downloaded every 120s per team.
 // (Key is sched2 — the old sched entries carried lastLine only.)
-async function cachedSchedLines(origin, lg, id, abbr, base) {
+//
+// The key needs only lg and id, so this runs alongside the team fetch rather
+// than after it; teamP is that fetch, awaited only to digest a fresh download.
+// Never rejects: every failure here degrades to null lines.
+async function cachedSchedLines(origin, lg, id, base, teamP) {
   const cache = caches.default;
   const key = origin && new Request(`${origin}/__cache/sched2/${lg}:${id}`);
   if (key) {
-    const hit = await cache.match(key);
-    if (hit) {
-      const j = await hit.json();
-      return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null, fromCache: true };
+    try {
+      const hit = await cache.match(key);
+      if (hit) {
+        const j = await hit.json();
+        return { lastLine: j.lastLine ?? null, nextLine: j.nextLine ?? null, fromCache: true };
+      }
+    } catch {
+      // An unreadable entry is a miss.
     }
   }
   let lastLine = null;
@@ -124,6 +132,12 @@ async function cachedSchedLines(origin, lg, id, abbr, base) {
     });
     if (schedRes.ok) {
       const sched = await schedRes.json();
+      // Digest against the team endpoint's abbreviation, as always. When that
+      // fetch failed, the schedule names its own team (checked live 2026-09-24),
+      // so the download just paid for still gets cached instead of repeated on
+      // every retry while the team endpoint is down.
+      const teamJson = await teamP.catch(() => null);
+      const abbr = teamJson?.team?.abbreviation || sched?.team?.abbreviation || '';
       lastLine = digestSchedule(sched, abbr);
       nextLine = digestNext(sched, abbr);
     }
@@ -217,15 +231,22 @@ async function cachedLiveComp(origin, lg, eventId, useCache) {
 
 export async function fetchTeamSummary(lg, id, origin) {
   const base = `https://site.api.espn.com/apis/site/v2/sports/${LEAGUE_PATHS[lg]}/teams/${id}`;
-  const teamRes = await fetch(base, {
+  const teamP = fetch(base, {
     headers: { 'User-Agent': ESPN_UA },
     signal: AbortSignal.timeout(10000),
+  }).then((teamRes) => {
+    if (!teamRes.ok) throw new Error(`espn team ${teamRes.status}`);
+    return teamRes.json();
   });
-  if (!teamRes.ok) throw new Error(`espn team ${teamRes.status}`);
-  const teamJson = await teamRes.json();
-  const abbr = teamJson?.team?.abbreviation ?? '';
-
-  const { lastLine, nextLine, fromCache } = await cachedSchedLines(origin, lg, id, abbr, base);
+  // The team fetch and the schedule lines are independent, so they overlap.
+  // allSettled, not all: a failed team fetch still waits for the schedule work
+  // already under way, so a download that was paid for gets cached rather than
+  // cut off when the response goes out. The team failure is then rethrown as
+  // ever, so cached() serves stale.
+  const [team, sched] = await Promise.allSettled([teamP, cachedSchedLines(origin, lg, id, base, teamP)]);
+  if (team.status === 'rejected') throw team.reason;
+  const teamJson = team.value;
+  const { lastLine, nextLine, fromCache } = sched.value;
   // Join the live game's scores by event id (see cachedLiveComp).
   let liveComp = null;
   const nextEv = teamJson?.team?.nextEvent?.[0];
