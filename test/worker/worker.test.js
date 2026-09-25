@@ -1160,6 +1160,53 @@ describe('/markets', () => {
     await clearCache('markets:AAA,BBB');
   });
 
+  it('keeps a watchlist fresh only as long as its oldest reused quote, never a full TTL from assembly', async () => {
+    // AAA fetched at t=0; the uncached list AAA,BBB assembled around it at
+    // t=449. The entry used to restart the clock there, so a board polling at
+    // t=898 still got the t=0 quote marked fresh. Now it has AAA's last second.
+    const key = 'markets:AAA,BBB';
+    await clearCache(key);
+    const t0 = Date.now() - 449_000;
+    const old = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
+    await seedQuotes({ AAA: { value: old, fetchedAt: t0 } });
+    stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
+    const first = await call('/markets?symbols=aaa,bbb');
+    expect((await first.json()).indices[0]).toEqual(old); // reused, as it should be
+    expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 450s
+    const entry = await caches.default.match(cacheKey('fresh', key));
+    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 450_000 + 500); // rounding slop
+
+    // Past t=450 the entry has lapsed with AAA, so AAA comes from Yahoo again
+    // instead of the t=0 quote being served as fresh.
+    await new Promise((r) => setTimeout(r, 1100));
+    const calls = stubFetch([{ match: /chart\/AAA/, body: ySym('AAA', 222, 200) }]);
+    const later = await call('/markets?symbols=aaa,bbb');
+    const body = await later.json();
+    expect(calls).toHaveLength(1); // AAA only; BBB is still fresh in the map
+    expect(body.stale).toBe(false);
+    expect(body.indices[0]).toMatchObject({ symbol: 'AAA', price: 222 });
+    // Now BBB, a second or so old, is the oldest quote and bounds the list.
+    const maxAge = Number(/max-age=(\d+)/.exec(later.headers.get('cache-control'))[1]);
+    expect(maxAge).toBeLessThan(450);
+    expect(maxAge).toBeGreaterThan(440);
+    await clearCache(key);
+  });
+
+  it('answers a hit missing its freshness stamp with the 1s floor, since the route TTL is a function', async () => {
+    // Every entry cached() writes carries X-Fresh-Until; this guards the
+    // fallback for one that does not, where a function ttlS has no digest to be
+    // asked with and must not reach the header as source text.
+    await clearCache('markets:AAPL');
+    await caches.default.put(cacheKey('fresh', 'markets:AAPL'), new Response(
+      JSON.stringify({ updatedAt: Math.floor(Date.now() / 1000), stale: false, indices: [] }),
+      { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=300' } },
+    ));
+    const res = await call('/markets?symbols=aapl');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=1');
+    await clearCache('markets:AAPL');
+  });
+
   it('stays inside the 50-subrequest budget at the worst case: 20 symbols, all needing the fallback', async () => {
     // Free plan: 50 per invocation, fetch() and Cache API match/put counted
     // together. Pinned to the exact tally in the fetchMarkets comment, so a

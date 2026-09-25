@@ -176,7 +176,22 @@ async function ipThrottled(origin, bucket, ip, windowS) {
 // falling back to a longer-lived stale copy (flagged stale) when upstream fails.
 // Keys live under the worker's own origin so put() stays same-zone; a second
 // day-long entry survives past ttlS to serve as that stale backup.
+//
+// ttlS is normally a number. A route whose payload can be born part-aged (the
+// markets watchlist, assembled from quotes a shared map may have held for most
+// of their life) passes a function instead: (digest) => seconds, called once on
+// the fetched digest, so the entry's lifetime can be what is LEFT of its oldest
+// part's rather than a full TTL restarted at assembly.
 const STALE_TTL_S = 24 * 3600;
+
+// The floor under a function ttlS: a digest whose parts are all but expired
+// still caches for a second, never for 0 or less (an unusable max-age). It is
+// also the hit path's answer when a function route's entry lacks its stamp.
+const MIN_FRESH_S = 1;
+
+// Whole seconds, rounded like the hit path's remainder, never under the floor;
+// a non-number (a digest missing what the function reads) gets the floor too.
+const freshSeconds = (s) => (Number.isFinite(s) ? Math.max(MIN_FRESH_S, Math.round(s)) : MIN_FRESH_S);
 
 // Stamped on every cache entry so a hit can advertise its REMAINING freshness
 // (see below) instead of restarting the clock on the board.
@@ -215,8 +230,11 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
     // a board that caches for a full TTL on top of a nearly-expired colo copy
     // would show data ~2x the intended age, which on a departure board reads as
     // wrong minutes rather than as stale.
+    // Every entry written below carries the stamp; the fallback is for one that
+    // somehow does not, and a function ttlS has no digest here to be asked with.
     const until = Number(hit.headers.get(FRESH_UNTIL));
-    const remaining = until > 0 ? Math.max(0, Math.round((until - Date.now()) / 1000)) : ttlS;
+    const fallbackS = typeof ttlS === 'function' ? MIN_FRESH_S : ttlS;
+    const remaining = until > 0 ? Math.max(0, Math.round((until - Date.now()) / 1000)) : fallbackS;
     return new Response(hit.body, {
       headers: {
         'Content-Type': 'application/json',
@@ -272,7 +290,11 @@ async function cached(origin, key, ttlS, fetcher, { mend, failBackoffS = 0 } = {
     // 2026-08-02: a seconds-long Jolpica flake became an HOUR of a drivers-only
     // F1 card on every board behind that colo, because the partial digest was
     // cached at the route's full 3600s.
-    const freshTtl = fresh?.partial ? Math.min(ttlS, 120) : ttlS;
+    //
+    // A function ttlS is resolved here, once, on the digest actually being
+    // served (after any mend), and floored at MIN_FRESH_S.
+    const ttl = typeof ttlS === 'function' ? freshSeconds(ttlS(fresh)) : ttlS;
+    const freshTtl = fresh?.partial ? Math.min(ttl, 120) : ttl;
     try {
       // A `partial` payload (some upstreams failed) is fine to serve fresh, but
       // must NOT overwrite the complete 24h stale backup.
@@ -325,9 +347,28 @@ const INDEX_NAMES = { '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^GSPC': 'S&P 500'
 const DEFAULT_SYMBOLS = Object.keys(INDEX_NAMES);
 
 // /markets TTL: 450s ≈ 1.5x the card's 5-minute poll (300s expired on every
-// request). It is also how long one symbol's quote stays fresh in the shared
-// quote map below.
+// request). It is one QUOTE's whole fresh life, counted from its Yahoo fetch:
+// the shared quote map below reuses a quote for that long, and a watchlist
+// entry built from it may serve it fresh only for what is left (marketsFreshS).
+// Without that second half, a list assembled at t=449 around a quote fetched at
+// t=0 restarted the clock and served the t=0 quote as fresh until t=899.
 const MARKETS_TTL_S = 450;
+
+// The oldest included quote's fetch time in ms, riding on the digest under a
+// symbol key: JSON.stringify skips symbol keys, so the served body is unchanged,
+// while stamped()'s spread copies it through to marketsFreshS. updatedAt is the
+// same instant floored to whole seconds, too coarse here: a watchlist fetched
+// entirely in this request would read as up to a second old and cache for 449s
+// or 450s at random.
+const OLDEST_QUOTE_MS = Symbol('oldest quote fetchedAt (ms)');
+
+// cached()'s ttlS for /markets: what remains of the oldest quote's fresh life
+// (cached() rounds it and floors it at MIN_FRESH_S). updatedAt is the fallback
+// should the symbol ever be lost on the way (a mend() would build a new object).
+const marketsFreshS = (digest) => {
+  const oldestMs = digest[OLDEST_QUOTE_MS] ?? digest.updatedAt * 1000;
+  return Math.min(MARKETS_TTL_S, (oldestMs + MARKETS_TTL_S * 1000 - Date.now()) / 1000);
+};
 
 // Fleet-wide per-symbol layer under the per-watchlist cached() entry (see
 // sharedmap.js). The route caches per whole sorted watchlist, so before this a
@@ -401,9 +442,11 @@ async function fetchMarkets(origin, symbols) {
   const partial = indices.length < symbols.length;
   // "as of" is the OLDEST quote's fetch time, not this assembly's: a watchlist
   // built partly from the shared map can carry a quote fetched up to
-  // MARKETS_TTL_S ago, and the card prints this stamp as its clock.
-  const updatedAt = Math.floor(Math.min(...held.map((q) => q.fetchedAt)) / 1000);
-  return { updatedAt, indices, ...(partial && { partial: true }) };
+  // MARKETS_TTL_S ago, and the card prints this stamp as its clock. The same
+  // instant, unrounded, bounds how long cached() keeps the list fresh.
+  const oldestMs = Math.min(...held.map((q) => q.fetchedAt));
+  const updatedAt = Math.floor(oldestMs / 1000);
+  return { updatedAt, indices, ...(partial && { partial: true }), [OLDEST_QUOTE_MS]: oldestMs };
 }
 
 // In-process dispatcher for the health monitor. A Worker fetching its OWN
@@ -553,7 +596,9 @@ const handlers = {
       // key is sorted so AAPL,MSFT and MSFT,AAPL coalesce to one entry.
       const symbols = [...new Set(requested.length ? requested : DEFAULT_SYMBOLS)];
       const cacheKey = [...symbols].sort().join(',');
-      return cached(url.origin, `markets:${cacheKey}`, MARKETS_TTL_S, () => fetchMarkets(url.origin, symbols));
+      // The entry's fresh lifetime is its oldest quote's remaining one, not a
+      // full MARKETS_TTL_S from assembly (see MARKETS_TTL_S).
+      return cached(url.origin, `markets:${cacheKey}`, marketsFreshS, () => fetchMarkets(url.origin, symbols));
     }
 
     if (path === '/path/realtime' && request.method === 'GET') {
