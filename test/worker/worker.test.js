@@ -32,6 +32,11 @@ const cacheKey = (kind, key) => new Request(`https://api.test/__cache/${kind}/${
 const clearCache = (key) =>
   Promise.all(['fresh', 'stale', 'fail'].map((kind) => caches.default.delete(cacheKey(kind, key))));
 
+// /markets keeps a fleet-wide per-symbol quote map underneath its per-watchlist
+// entries (see sharedmap.js). Cleared after every case, so a quote one case
+// fetched can never answer another case's symbol.
+const quoteMapKey = new Request('https://api.test/__cache/map/mkt%3Aquotes');
+
 // /njt/departures keys its entry by the New York service day (see the route).
 const njtKey = () => `njt:${nyDate()}`;
 
@@ -65,6 +70,7 @@ afterEach(async () => {
   await resetNjtToken(env); // clears the KV session token + isolate memo so it can't leak between cases
   await env.CODES.delete('njt:schedule'); // the durable day-timetable store
   await clearCache(njtKey()); // and the route's own cache entry (fresh + backup + backoff)
+  await caches.default.delete(quoteMapKey);
   resetGraphToken(); // clears the isolate's Microsoft Graph token memo
 });
 
@@ -1070,8 +1076,10 @@ describe('/markets', () => {
     // 1. full success → both fresh + 24h stale hold the complete 2-index list
     stubFetch([{ match: /chart\/AAA/, body: y('AAA') }, { match: /chart\/BBB/, body: y('BBB') }]);
     expect((await (await call('/markets?symbols=aaa,bbb')).json()).indices).toHaveLength(2);
-    // 2. expire only the FRESH copy (simulate the 300s TTL lapsing)
+    // 2. expire only the FRESH copy (simulate the TTL lapsing — for the
+    //    watchlist entry and, on the same clock, the per-symbol quotes)
     await caches.default.delete(cacheKey('fresh', key));
+    await caches.default.delete(quoteMapKey);
     // 3. one symbol now fails → partial fresh payload, flagged
     stubFetch([{ match: /chart\/AAA/, body: y('AAA') }, { match: /chart\/BBB/, body: 'no', status: 500 }]);
     const partial = await (await call('/markets?symbols=aaa,bbb')).json();
@@ -1080,10 +1088,100 @@ describe('/markets', () => {
     // 4. expire fresh again; a total outage must serve the FULL backup, not the
     //    crippled partial (the bug: step 3 would have poisoned the stale key)
     await caches.default.delete(cacheKey('fresh', key));
+    await caches.default.delete(quoteMapKey);
     stubFetch([{ match: /chart\/(AAA|BBB)/, body: 'no', status: 500, times: 2 }]);
     const served = await (await call('/markets?symbols=aaa,bbb')).json();
     expect(served.stale).toBe(true);
     expect(served.indices).toHaveLength(2);
+  });
+
+  // The per-symbol layer (sharedmap.js). The route caches per whole watchlist,
+  // so before it a symbol shared by many watchlists was refetched from Yahoo
+  // once per distinct list — the largest upstream on the worker's dashboard.
+  const ySym = (sym, price = 100, prev = 90) => {
+    const b = yahoo(price, prev);
+    b.chart.result[0].meta.symbol = sym;
+    return b;
+  };
+  const seedQuotes = (entries) => caches.default.put(quoteMapKey, new Response(JSON.stringify({ entries }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=86400' },
+  }));
+
+  it('fetches a symbol shared by two watchlists from Yahoo once', async () => {
+    await Promise.all([clearCache('markets:AAA,BBB'), clearCache('markets:AAA,CCC')]);
+    const calls = stubFetch([
+      { match: /chart\/AAA/, body: ySym('AAA'), times: 2 },
+      { match: /chart\/BBB/, body: ySym('BBB') },
+      { match: /chart\/CCC/, body: ySym('CCC') },
+    ]);
+    const one = await (await call('/markets?symbols=aaa,bbb')).json();
+    const two = await (await call('/markets?symbols=ccc,aaa')).json();
+    expect(calls.filter((u) => /chart\/AAA/.test(u))).toHaveLength(1);
+    expect(one.indices.map((q) => q.symbol)).toEqual(['AAA', 'BBB']);
+    expect(two.indices.map((q) => q.symbol)).toEqual(['CCC', 'AAA']); // request order kept
+    expect(two.indices[1]).toEqual(one.indices[0]); // the very same quote
+    await Promise.all([clearCache('markets:AAA,BBB'), clearCache('markets:AAA,CCC')]);
+  });
+
+  it('runs the zero-change daily-bars fallback once per symbol per TTL, not once per watchlist', async () => {
+    await Promise.all([clearCache('markets:CBG.L'), clearCache('markets:AAA,CBG.L')]);
+    const rolled = ySym('CBG.L', 413.6, 413.6);
+    rolled.chart.result[0].indicators.quote[0].close = [407.8, 410.1, 413.6];
+    const daily = { chart: { result: [{ meta: { symbol: 'CBG.L' },
+      indicators: { quote: [{ close: [402.0, 409.4, 413.6] }] } }] } };
+    const calls = stubFetch([
+      { match: /chart\/CBG\.L\?range=2d/, body: rolled, times: 2 },
+      { match: /chart\/CBG\.L\?range=5d&interval=1d/, body: daily, times: 2 },
+      { match: /chart\/AAA/, body: ySym('AAA') },
+    ]);
+    await call('/markets?symbols=CBG.L');
+    const second = await (await call('/markets?symbols=aaa,CBG.L')).json();
+    expect(calls.filter((u) => /interval=1d/.test(u))).toHaveLength(1);
+    expect(second.indices[1].change).toBeCloseTo(413.6 - 409.4, 5); // the recovered change rides along
+    await Promise.all([clearCache('markets:CBG.L'), clearCache('markets:AAA,CBG.L')]);
+  });
+
+  it('refetches a quote older than the markets TTL and stamps "as of" with the oldest quote used', async () => {
+    await clearCache('markets:AAA,BBB');
+    const t = Date.now();
+    const kept = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
+    await seedQuotes({
+      AAA: { value: kept, fetchedAt: t - 200_000 }, // inside 450s: reused
+      BBB: { value: { symbol: 'BBB' }, fetchedAt: t - 451_000 }, // past it: refetched
+    });
+    const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
+    const res = await (await call('/markets?symbols=aaa,bbb')).json();
+    expect(calls).toHaveLength(1); // BBB only
+    expect(res.indices[0]).toEqual(kept);
+    expect(res.indices[1]).toMatchObject({ symbol: 'BBB', price: 100 });
+    // The card prints updatedAt as its "as of" clock: it must not claim the
+    // 200s-old AAA quote is from now.
+    expect(res.updatedAt).toBe(Math.floor((t - 200_000) / 1000));
+    await clearCache('markets:AAA,BBB');
+  });
+
+  it('stays inside the 50-subrequest budget at the worst case: 20 symbols, all needing the fallback', async () => {
+    // Free plan: 50 per invocation, fetch() and Cache API match/put counted
+    // together. Pinned to the exact tally in the fetchMarkets comment, so a
+    // change that spends one more has to update that arithmetic too.
+    const want = Array.from({ length: 20 }, (_, i) => `TK${String(i).padStart(2, '0')}`);
+    const key = `markets:${[...want].sort().join(',')}`;
+    await clearCache(key);
+    const calls = stubFetch([
+      { match: /range=2d/, body: yahoo(100, 100), times: 20 }, // change 0 → fallback
+      { match: /interval=1d/, body: { chart: { result: [{ indicators: { quote: [{ close: [95, 100] }] } }] } }, times: 20 },
+    ]);
+    const match = vi.spyOn(caches.default, 'match');
+    const put = vi.spyOn(caches.default, 'put');
+    const res = await call(`/markets?symbols=${want.join(',')}`);
+    const spent = calls.length + match.mock.calls.length + put.mock.calls.length;
+    match.mockRestore();
+    put.mockRestore();
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(40);
+    expect(spent).toBe(45);
+    expect(spent).toBeLessThan(50);
+    await clearCache(key);
   });
 });
 

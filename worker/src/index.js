@@ -3,6 +3,7 @@
 // nothing served here is sensitive, and the boards fetch from a static origin.
 
 import { mapYahooChart } from './markets.js';
+import { sharedMapGet } from './sharedmap.js';
 import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
 import { fetchBusStops, parseLegs } from './bus.js';
@@ -323,51 +324,86 @@ const YAHOO_UA =
 const INDEX_NAMES = { '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^GSPC': 'S&P 500' };
 const DEFAULT_SYMBOLS = Object.keys(INDEX_NAMES);
 
-async function fetchMarkets(symbols) {
+// /markets TTL: 450s ≈ 1.5x the card's 5-minute poll (300s expired on every
+// request). It is also how long one symbol's quote stays fresh in the shared
+// quote map below.
+const MARKETS_TTL_S = 450;
+
+// Fleet-wide per-symbol layer under the per-watchlist cached() entry (see
+// sharedmap.js). The route caches per whole sorted watchlist, so before this a
+// symbol common to many watchlists was refetched from Yahoo once per distinct
+// list; now each symbol is fetched at most once per MARKETS_TTL_S per colo, and
+// so is its zero-change daily-bars fallback. 200 entries at ~1.5 KB a quote
+// (the sparklines) keeps the parse and re-serialize well inside the CPU budget.
+const MARKETS_MAP = 'mkt:quotes';
+const MARKETS_MAP_MAX = 200;
+
+// One symbol, one or two Yahoo subrequests. Throws on a failed chart fetch or a
+// malformed payload; the daily-bars fallback never throws.
+async function fetchQuote(symbol) {
+  // 2d, not 1d: once a foreign market closes, Yahoo rolls the session into
+  // chartPreviousClose (price === prev → the card showed 0.00 daily change
+  // for LSE tickers all evening). With two days of bars, mapYahooChart
+  // takes the daily baseline from the prior session's last close itself.
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2d&interval=15m`;
+  const res = await fetch(url, { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`yahoo ${res.status}`);
+  const out = mapYahooChart(await res.json(), INDEX_NAMES[symbol]);
+  // Yahoo doesn't reliably honor range=2d from Cloudflare egress (it can
+  // return a single session with the close already rolled — change 0.00),
+  // even though the same request from a browser gets two days. When the
+  // change computes to zero, pull the true prior close from a tiny
+  // daily-bars request; a genuinely flat day just recomputes to zero.
+  if (out.change === 0) {
+    try {
+      const r2 = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`,
+        { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) },
+      );
+      if (r2.ok) {
+        const daily = ((await r2.json())?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [])
+          .filter(Number.isFinite);
+        const prior = daily.length >= 2 ? daily[daily.length - 2] : null;
+        if (Number.isFinite(prior) && prior !== 0) {
+          out.change = out.price - prior;
+          out.changePct = ((out.price - prior) / prior) * 100;
+        }
+      }
+    } catch { /* keep the zero-change mapping */ }
+  }
+  return out;
+}
+
+// Subrequest budget for one /markets miss, worst case (Free plan: 50, fetch()
+// and Cache API calls counted together):
+//   cached(): fresh match                                   1
+//   quote map: match                                        1
+//   20 symbols (the route cap) x chart + daily-bars        40
+//   quote map: put                                          1
+//   cached(): fresh put + stale put                         2
+//                                                         ----
+//                                                          45
+// A total wipeout instead costs 1 + 1 + 20 + the stale match = 23. Raising the
+// symbol cap past 20 breaks this budget: re-count before touching it.
+async function fetchMarkets(origin, symbols) {
   // One unresolvable symbol shouldn't 502 the whole batch (and, without a
   // negative cache, re-hit Yahoo for the good symbols on every retry). Drop
   // the failures; only a total wipeout throws (so cached() serves stale/502).
-  const settled = await Promise.allSettled(
-    symbols.map(async (symbol) => {
-      // 2d, not 1d: once a foreign market closes, Yahoo rolls the session into
-      // chartPreviousClose (price === prev → the card showed 0.00 daily change
-      // for LSE tickers all evening). With two days of bars, mapYahooChart
-      // takes the daily baseline from the prior session's last close itself.
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2d&interval=15m`;
-      const res = await fetch(url, { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`yahoo ${res.status}`);
-      const out = mapYahooChart(await res.json(), INDEX_NAMES[symbol]);
-      // Yahoo doesn't reliably honor range=2d from Cloudflare egress (it can
-      // return a single session with the close already rolled — change 0.00),
-      // even though the same request from a browser gets two days. When the
-      // change computes to zero, pull the true prior close from a tiny
-      // daily-bars request; a genuinely flat day just recomputes to zero.
-      if (out.change === 0) {
-        try {
-          const r2 = await fetch(
-            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`,
-            { headers: { 'User-Agent': YAHOO_UA }, signal: AbortSignal.timeout(10000) },
-          );
-          if (r2.ok) {
-            const daily = ((await r2.json())?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [])
-              .filter(Number.isFinite);
-            const prior = daily.length >= 2 ? daily[daily.length - 2] : null;
-            if (Number.isFinite(prior) && prior !== 0) {
-              out.change = out.price - prior;
-              out.changePct = ((out.price - prior) / prior) * 100;
-            }
-          }
-        } catch { /* keep the zero-change mapping */ }
-      }
-      return out;
-    }),
-  );
-  const indices = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
-  if (!indices.length) throw new Error('yahoo: all symbols failed');
+  const quotes = await sharedMapGet(origin, MARKETS_MAP, symbols, async (missing) => {
+    const settled = await Promise.allSettled(missing.map(fetchQuote));
+    return new Map(missing.flatMap((symbol, i) => (settled[i].status === 'fulfilled' ? [[symbol, settled[i].value]] : [])));
+  }, { freshS: MARKETS_TTL_S, maxEntries: MARKETS_MAP_MAX });
+  const held = symbols.filter((s) => quotes.has(s)).map((s) => quotes.get(s));
+  if (!held.length) throw new Error('yahoo: all symbols failed');
+  const indices = held.map((q) => q.value);
   // Mark an incomplete batch so cached() won't promote it over a complete 24h
   // stale backup (a later total outage should serve the full list, not this).
   const partial = indices.length < symbols.length;
-  return { indices, ...(partial && { partial: true }) };
+  // "as of" is the OLDEST quote's fetch time, not this assembly's: a watchlist
+  // built partly from the shared map can carry a quote fetched up to
+  // MARKETS_TTL_S ago, and the card prints this stamp as its clock.
+  const updatedAt = Math.floor(Math.min(...held.map((q) => q.fetchedAt)) / 1000);
+  return { updatedAt, indices, ...(partial && { partial: true }) };
 }
 
 // In-process dispatcher for the health monitor. A Worker fetching its OWN
@@ -511,14 +547,13 @@ const handlers = {
         // Matches the config cap (site/js/config.js, TICKER_MAX in
         // settings/pickers.js): a board may follow 20 tickers and the expand
         // overlay shows all of them, so all 20 must be fetched. Each symbol is
-        // one Yahoo subrequest, well inside the Workers per-request limit.
+        // up to two Yahoo subrequests; see fetchMarkets for the whole budget.
         .slice(0, 20);
       // Dedupe for the fetch, but keep request order for display; the cache
       // key is sorted so AAPL,MSFT and MSFT,AAPL coalesce to one entry.
       const symbols = [...new Set(requested.length ? requested : DEFAULT_SYMBOLS)];
       const cacheKey = [...symbols].sort().join(',');
-      // 450s ≈ 1.5x the card's 5-minute poll (300s expired on every request).
-      return cached(url.origin, `markets:${cacheKey}`, 450, () => fetchMarkets(symbols));
+      return cached(url.origin, `markets:${cacheKey}`, MARKETS_TTL_S, () => fetchMarkets(url.origin, symbols));
     }
 
     if (path === '/path/realtime' && request.method === 'GET') {
