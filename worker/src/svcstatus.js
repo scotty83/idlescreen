@@ -460,6 +460,17 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 // attempt like any other, so it retries.
 const RETRY_PAUSE_MS = 250;
 
+// ...except a 4xx, which is the server's considered answer to THIS request (403
+// a WAF or bot rule, 404 no such route, 429 a rate limit) and draws the same
+// answer 250 ms later. Retrying one only tripled the errors on the upstream's
+// side and spent two more of the invocation's 50 subrequests: the worker's
+// dashboard showed ~40% of a day's requests to status.cloud.microsoft failing,
+// 641 of those 662 errors 4xx, while a residential IP got 200 every time. 408
+// (the request timed out) is the one 4xx a retry can fix. The retry above was
+// born for portal.office.com flapping 200/404 while Microsoft unrouted it; that
+// endpoint is gone (see the m365 block), and a 404 from a live one is not a flap.
+const isFinalStatus = (status) => status >= 400 && status < 500 && status !== 408;
+
 // The whole /services/status fan-out must finish before the health self-probe's
 // 13s deadline (worker/src/health.js) and the board's 15s fetch (site/js/net.js):
 // otherwise 10 + 5 + 5s of retries against ONE slow provider outlives both, and
@@ -473,11 +484,13 @@ const MIN_ATTEMPT_MS = 1200; // don't open an attempt (or retry) with less budge
 
 async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
   let lastErr;
+  let attempts = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     const remaining = deadline - Date.now();
     // Out of budget: stop rather than open an attempt that would overrun the
     // route deadline and take the whole digest down with it.
     if (remaining < MIN_ATTEMPT_MS) break;
+    attempts++;
     try {
       const res = await fetch(url, {
         // Shrink the per-attempt timeout to whatever budget is left, so the last
@@ -485,7 +498,12 @@ async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
         signal: AbortSignal.timeout(Math.min(attempt ? 5000 : 10000, remaining)),
         headers: { 'User-Agent': UA },
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // A rate limit's Retry-After is the one header worth a log line: it
+        // says whether the limit is a burst or a long block. Never the body.
+        const after = res.headers.get('retry-after');
+        throw Object.assign(new Error(`HTTP ${res.status}${after ? ` (retry-after ${after})` : ''}`), { final: isFinalStatus(res.status) });
+      }
       // Only HTML is rejected up front, not "anything that isn't application/
       // json": AWS serves its JSON as charset=utf-16 and a stricter gate would
       // break feeds that are merely sloppy about the header. A wrong body still
@@ -496,12 +514,17 @@ async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
       return binary ? decodeBomJson(await res.arrayBuffer()) : await res.json();
     } catch (e) {
       lastErr = e;
+      if (e.final) break;
       // Only pause before a retry we can still afford (and never past the deadline).
       if (attempt < 2 && deadline - Date.now() > MIN_ATTEMPT_MS + RETRY_PAUSE_MS) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
     }
   }
-  // lastErr is unset only if the very first attempt was skipped for lack of budget.
-  throw lastErr ?? new Error('no budget for status request');
+  // Every failure names its host and how many requests it spent, so a warn in
+  // Workers Logs says which upstream answered what without the URL (or any
+  // body) riding along. lastErr is unset only if the very first attempt was
+  // skipped for lack of budget.
+  const why = lastErr ? String(lastErr.message ?? lastErr) : 'no budget for status request';
+  throw new Error(`${new URL(url).host} failed after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${why}`, { cause: lastErr });
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +653,9 @@ async function fetchOne(id, env, deadline = Infinity) {
     // in fetchServiceRows rather than threaded through here.
     const [consumer, mirror, graph] = await Promise.all([
       ...svc.urls.map((u) => fetchJson(u, { deadline }).catch((e) => {
-        console.warn(`[svcstatus] m365 source failed (${u}): ${String(e?.message ?? e)}`);
+        // fetchJson's message already names the host, the attempts and the
+        // HTTP status; the URL itself adds nothing (the two hosts differ).
+        console.warn(`[svcstatus] m365 source ${String(e?.message ?? e)}`);
         return null;
       })),
       graphConfigured(env) ? fetchGraphHealth(env).catch((e) => {
@@ -672,7 +697,12 @@ function withDeadline(promise, deadline) {
 export async function fetchServiceRows(ids, env, deadline = Date.now() + SVC_DEADLINE_MS) {
   const settled = await Promise.allSettled(ids.map((id) => withDeadline(fetchOne(id, env, deadline), deadline)));
   const rows = new Map();
-  settled.forEach((s, i) => { if (s.status === 'fulfilled') rows.set(ids[i], s.value); });
+  settled.forEach((s, i) => {
+    if (s.status === 'fulfilled') rows.set(ids[i], s.value);
+    // The only trace a failed provider leaves besides its unknown row: the host,
+    // attempts and HTTP status fetchJson put in the message, or the deadline.
+    else console.warn(`[svcstatus] ${ids[i]} ${String(s.reason?.message ?? s.reason)}`);
+  });
   return rows;
 }
 

@@ -60,7 +60,8 @@ function stubFetch(routes) {
         status: route.status ?? 200,
         // `ctype` overrides for the feeds that answer 200 with the WRONG type
         // (Microsoft's hosts serve HTML error pages that way).
-        headers: { 'Content-Type': route.ctype ?? (route.raw ? 'application/x-protobuf' : 'application/json') },
+        // `headers` adds any others a case needs (a 429's Retry-After).
+        headers: { 'Content-Type': route.ctype ?? (route.raw ? 'application/x-protobuf' : 'application/json'), ...route.headers },
       },
     );
   });
@@ -2238,15 +2239,64 @@ describe('/services/status route', () => {
   });
 
   it('retries a flapping source before reporting unknown', async () => {
+    // The mirror is down too, so the row stands or falls on the consumer
+    // feed's retry: a 5xx is a server having a bad moment, worth a second ask.
     await clearCache('svc:m365');
-    stubFetch([
-      { match: /status\.cloud\.microsoft/, body: { Message: 'No HTTP resource was found' }, status: 404, times: 1 },
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'busy', status: 503, times: 1 },
       { match: /status\.cloud\.microsoft/, body: m365Fx },
-      { match: /aguidetocloud/, body: allGreenMirror() },
+      { match: /aguidetocloud/, body: 'down', status: 500, times: 3 },
     ]);
     const digest = await (await call('/services/status?ids=m365')).json();
     expect(digest.services[0]).toMatchObject({ id: 'm365', state: 'ok' });
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(2);
     await clearCache('svc:m365');
+  });
+
+  // A 4xx is the server's considered answer and a retry 250 ms later draws the
+  // same one. Microsoft's consumer feed answered ~40% 4xx to Cloudflare egress,
+  // and every one of those used to be asked three times.
+  it.each([403, 404, 429])('asks once, not three times, when a feed answers %i', async (status) => {
+    await clearCache('svc:m365');
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'no', status, times: 3 },
+      { match: /aguidetocloud/, body: allGreenMirror() },
+    ]);
+    const digest = await (await call('/services/status?ids=m365')).json();
+    expect(digest.services[0].state).toBe('ok'); // the mirror still carries the row
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(1);
+    await clearCache('svc:m365');
+  });
+
+  it('still retries a 408, the one 4xx a second ask can fix', async () => {
+    await clearCache('svc:m365');
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'slow', status: 408, times: 1 },
+      { match: /status\.cloud\.microsoft/, body: m365Fx },
+      { match: /aguidetocloud/, body: 'down', status: 500, times: 3 },
+    ]);
+    const digest = await (await call('/services/status?ids=m365')).json();
+    expect(digest.services[0].state).toBe('ok');
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(2);
+    await clearCache('svc:m365');
+  });
+
+  it('logs which host answered which status, never the body', async () => {
+    // Workers Logs are the only place to tell a WAF 403 from a rate-limit 429.
+    await clearCache('svc:github,m365');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'SECRET-BODY-TEXT', status: 429, headers: { 'Retry-After': '30' } },
+      { match: /aguidetocloud/, body: allGreenMirror() },
+      { match: /githubstatus/, body: 'OTHER-BODY-TEXT', status: 503, times: 3 },
+    ]);
+    await call('/services/status?ids=github,m365');
+    const logged = warn.mock.calls.flat().map(String).join('\n');
+    warn.mockRestore();
+    expect(logged).toContain('[svcstatus] m365 source status.cloud.microsoft failed after 1 attempt: HTTP 429 (retry-after 30)');
+    expect(logged).toContain('[svcstatus] github www.githubstatus.com failed after 3 attempts: HTTP 503');
+    expect(logged).not.toContain('BODY-TEXT');
+    await clearCache('svc:github,m365');
   });
 
   it('m365 reads both feeds and reports the outage an office would feel', async () => {

@@ -464,7 +464,9 @@ const SVC_MAP_MAX = Object.keys(SERVICES).length;
 // Subrequest budget for one /services/status miss, worst case (Free plan: 50,
 // fetch() and Cache API calls counted together). Every one of the 11 providers
 // (the route cap, and the whole registry) missing the row map, each succeeding
-// only on its last attempt:
+// only on its last attempt. Only a 5xx, a network error or a 200 with the wrong
+// body spends a retry; a 4xx ends a source after one request (see fetchJson),
+// so a feed that 403s or 429s costs 1 here, not 3:
 //   cached(): fresh match                                         1
 //   row map: match                                                1
 //   10 single-feed providers x 3 attempts                        30
