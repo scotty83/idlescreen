@@ -37,6 +37,24 @@
 // maxEntries bounds CPU as much as size: the entry is parsed on every call and
 // re-serialized on every write, inside the 10 ms Free-plan CPU budget. Size a
 // caller's cap from its value size (a markets quote with sparklines is ~1.5 KB).
+//
+// A digest assembled from these values and cached whole (cached() in index.js)
+// can be born part-aged: a value reused at t=449 of a 450s life must not be
+// served fresh until t=899 because the digest restarted the clock. A caller
+// stamps the oldest value's fetchedAt on its digest under OLDEST_FETCHED_MS and
+// hands cached() freshForOldest(ttlS) as its ttlS, so the digest lives only for
+// what is left of that oldest part. A symbol key, because JSON.stringify skips
+// it: the served body is unchanged, while stamped()'s spread (and a mend's)
+// copies it through to the ttl function. updatedAt is the same instant floored
+// to whole seconds, too coarse to use here: a digest fetched entirely in this
+// request would read as up to a second old and cache for ttlS-1 or ttlS at
+// random. It is the fallback should the symbol ever be lost on the way.
+export const OLDEST_FETCHED_MS = Symbol('oldest part fetchedAt (ms)');
+
+export const freshForOldest = (ttlS) => (digest) => {
+  const oldestMs = digest[OLDEST_FETCHED_MS] ?? digest.updatedAt * 1000;
+  return Math.min(ttlS, (oldestMs + ttlS * 1000 - Date.now()) / 1000);
+};
 
 const DAY_S = 24 * 3600;
 

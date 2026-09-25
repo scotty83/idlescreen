@@ -460,24 +460,55 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 // attempt like any other, so it retries.
 const RETRY_PAUSE_MS = 250;
 
+// ...except a 4xx, which is the server's considered answer to THIS request (403
+// a WAF or bot rule, 404 no such route, 429 a rate limit) and draws the same
+// answer 250 ms later. Retrying one only tripled the errors on the upstream's
+// side and spent two more of the invocation's 50 subrequests: the worker's
+// dashboard showed ~40% of a day's requests to status.cloud.microsoft failing,
+// 641 of those 662 errors 4xx, while a residential IP got 200 every time. 408
+// (the request timed out) is the one 4xx a retry can fix. The retry above was
+// born for portal.office.com flapping 200/404 while Microsoft unrouted it; that
+// endpoint is gone (see the m365 block), and a 404 from a live one is not a flap.
+const isFinalStatus = (status) => status >= 400 && status < 500 && status !== 408;
+
 // The whole /services/status fan-out must finish before the health self-probe's
 // 13s deadline (worker/src/health.js) and the board's 15s fetch (site/js/net.js):
 // otherwise 10 + 5 + 5s of retries against ONE slow provider outlives both, and
 // the browser aborts the request so the entire card fails instead of showing the
 // providers that DID answer. Two mechanisms hold the budget: fetchJson is handed
 // the remaining time so it shrinks each attempt's timeout and skips a retry it
-// can't afford, and fetchServiceStatuses abandons any provider still running at
+// can't afford, and fetchServiceRows abandons any provider still running at
 // the deadline (its row goes unknown, which marks the digest partial).
 export const SVC_DEADLINE_MS = 12000; // under 13s, leaving margin for serialize + cache writes
 const MIN_ATTEMPT_MS = 1200; // don't open an attempt (or retry) with less budget than this
 
+// Every failure message in this file ends up in a log line (fetchServiceRows,
+// the m365 block), and a JSON parser's error quotes the very text it choked on:
+// `Unexpected token 'S', "SECRET..." is not valid JSON`. So a body that will not
+// parse fails with a fixed diagnostic naming its media type and nothing of its
+// content. Any other error from reading the body (a timeout or a dropped
+// connection mid-stream) passes through as is: it says nothing about what the
+// upstream sent. `what` prefixes the message the way the Graph calls label
+// theirs ('token', 'health').
+async function readJson(read, ctype, what) {
+  try {
+    return await read();
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) throw e;
+    const media = ctype.split(';')[0].trim() || 'no content-type';
+    throw new Error(`${what ? `${what} ` : ''}invalid JSON body (${media})`);
+  }
+}
+
 async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
   let lastErr;
+  let attempts = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     const remaining = deadline - Date.now();
     // Out of budget: stop rather than open an attempt that would overrun the
     // route deadline and take the whole digest down with it.
     if (remaining < MIN_ATTEMPT_MS) break;
+    attempts++;
     try {
       const res = await fetch(url, {
         // Shrink the per-attempt timeout to whatever budget is left, so the last
@@ -485,7 +516,12 @@ async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
         signal: AbortSignal.timeout(Math.min(attempt ? 5000 : 10000, remaining)),
         headers: { 'User-Agent': UA },
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // A rate limit's Retry-After is the one header worth a log line: it
+        // says whether the limit is a burst or a long block. Never the body.
+        const after = res.headers.get('retry-after');
+        throw Object.assign(new Error(`HTTP ${res.status}${after ? ` (retry-after ${after})` : ''}`), { final: isFinalStatus(res.status) });
+      }
       // Only HTML is rejected up front, not "anything that isn't application/
       // json": AWS serves its JSON as charset=utf-16 and a stricter gate would
       // break feeds that are merely sloppy about the header. A wrong body still
@@ -493,15 +529,21 @@ async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
       const ctype = res.headers.get('content-type') ?? '';
       if (/text\/html/i.test(ctype)) throw new Error(`HTML body (content-type ${ctype})`);
       // AWS is UTF-16-with-BOM (see decodeBomJson); everything else is plain JSON.
-      return binary ? decodeBomJson(await res.arrayBuffer()) : await res.json();
+      // A malformed body is still a failed attempt, so it still retries.
+      return await readJson(async () => (binary ? decodeBomJson(await res.arrayBuffer()) : res.json()), ctype);
     } catch (e) {
       lastErr = e;
+      if (e.final) break;
       // Only pause before a retry we can still afford (and never past the deadline).
       if (attempt < 2 && deadline - Date.now() > MIN_ATTEMPT_MS + RETRY_PAUSE_MS) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
     }
   }
-  // lastErr is unset only if the very first attempt was skipped for lack of budget.
-  throw lastErr ?? new Error('no budget for status request');
+  // Every failure names its host and how many requests it spent, so a warn in
+  // Workers Logs says which upstream answered what without the URL (or any
+  // body) riding along. lastErr is unset only if the very first attempt was
+  // skipped for lack of budget.
+  const why = lastErr ? String(lastErr.message ?? lastErr) : 'no budget for status request';
+  throw new Error(`${new URL(url).host} failed after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${why}`, { cause: lastErr });
 }
 
 // ---------------------------------------------------------------------------
@@ -566,10 +608,14 @@ async function graphAccessToken(env) {
         signal: AbortSignal.timeout(attempt ? 4000 : 8000),
       });
       if (!res.ok) {
-        const code = await res.json().then((j) => (typeof j?.error === 'string' ? j.error : null)).catch(() => null);
+        // Only something shaped like a code ('invalid_client') is taken; a free-
+        // text `error` would be body prose riding into the log.
+        const code = await res.json().then((j) => (typeof j?.error === 'string' && /^[a-z0-9_]{1,64}$/i.test(j.error) ? j.error : null)).catch(() => null);
         throw new Error(`token HTTP ${res.status}${code ? ` (${code})` : ''}`);
       }
-      const j = await res.json();
+      // A 200 that will not parse must not quote itself into the log: the body of
+      // a token answer is the one place a credential could be sitting.
+      const j = await readJson(() => res.json(), res.headers.get('content-type') ?? '', 'token');
       if (typeof j?.access_token !== 'string' || !j.access_token) throw new Error('token response missing access_token');
       // expires_in is SECONDS from now, counted from the answer landing rather
       // than from when we started asking.
@@ -603,8 +649,9 @@ async function fetchGraphHealth(env) {
       }
       // Same lesson as fetchJson: Microsoft's hosts answer 200 with an HTML
       // consent/error page often enough that the body has to be checked.
-      if (/text\/html/i.test(res.headers.get('content-type') ?? '')) throw new Error('health HTML body');
-      return await res.json();
+      const ctype = res.headers.get('content-type') ?? '';
+      if (/text\/html/i.test(ctype)) throw new Error('health HTML body');
+      return await readJson(() => res.json(), ctype, 'health');
     } catch (e) {
       lastErr = e;
       if (attempt < 1) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
@@ -615,7 +662,9 @@ async function fetchGraphHealth(env) {
 
 // env is optional: every caller that predates the tenant source (and every test
 // that maps a fixture) may leave it off, and without it the Graph source is
-// simply never reached.
+// simply never reached. Resolves to the mapped row alone ({state, note,
+// incidents, ...}); serviceDigest adds the id and label, so the shared row map
+// in index.js stores nothing a deploy could rename underneath it.
 async function fetchOne(id, env, deadline = Infinity) {
   const svc = SERVICES[id];
   if (svc.adapter === 'm365') {
@@ -625,10 +674,12 @@ async function fetchOne(id, env, deadline = Infinity) {
     // tenant that is misconfigured or mid-outage costs the fallback no latency.
     // The public feeds honour the route deadline; the optional Graph call keeps
     // its own (shorter) internal timeouts and is capped by the withDeadline guard
-    // in fetchServiceStatuses rather than threaded through here.
+    // in fetchServiceRows rather than threaded through here.
     const [consumer, mirror, graph] = await Promise.all([
       ...svc.urls.map((u) => fetchJson(u, { deadline }).catch((e) => {
-        console.warn(`[svcstatus] m365 source failed (${u}): ${String(e?.message ?? e)}`);
+        // fetchJson's message already names the host, the attempts and the
+        // HTTP status; the URL itself adds nothing (the two hosts differ).
+        console.warn(`[svcstatus] m365 source ${String(e?.message ?? e)}`);
         return null;
       })),
       graphConfigured(env) ? fetchGraphHealth(env).catch((e) => {
@@ -639,18 +690,18 @@ async function fetchOne(id, env, deadline = Infinity) {
         return null;
       }) : null,
     ]);
-    return { id, label: svc.label, ...mapM365(consumer, mirror, Date.now(), graph) };
+    return mapM365(consumer, mirror, Date.now(), graph);
   }
   const json = await fetchJson(svc.url, { binary: svc.adapter === 'aws', deadline });
-  return { id, label: svc.label, ...MAPPERS[svc.adapter](json, Date.now()) };
+  return MAPPERS[svc.adapter](json, Date.now());
 }
 
 // Abandon a provider still running when the overall route budget lapses, so one
 // slow or hung source can't hold the digest past the health probe's deadline. The
-// loser settles as a rejection, which fetchServiceStatuses reads as an unknown
-// row (and thus a partial digest); the orphaned fetch is cut with the request
-// context. This is the backstop under fetchJson's own budget-aware timeouts, and
-// the only cap on the optional Graph tenant call.
+// loser settles as a rejection, which fetchServiceRows leaves out, so it reads
+// as an unknown row (and thus a partial digest); the orphaned fetch is cut with
+// the request context. This is the backstop under fetchJson's own budget-aware
+// timeouts, and the only cap on the optional Graph tenant call.
 function withDeadline(promise, deadline) {
   const ms = deadline - Date.now();
   if (ms <= 0) return Promise.reject(new Error('service deadline exceeded'));
@@ -659,13 +710,35 @@ function withDeadline(promise, deadline) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
-export async function fetchServiceStatuses(ids, env) {
-  // One shared deadline for the whole fan-out (not per provider), so N slow
-  // providers can't each spend the full budget in series behind Promise.allSettled.
-  const deadline = Date.now() + SVC_DEADLINE_MS;
+// Fetch and map each provider, all at once. Resolves to a Map of id -> mapped
+// row for every provider that ANSWERED, including one whose mapper could only
+// say 'unknown'; a provider that threw, or was still running at the deadline, is
+// simply absent. Never rejects.
+//
+// One shared deadline for the whole fan-out (not per provider), so N slow
+// providers can't each spend the full budget in series behind Promise.allSettled.
+// The route passes its own, started before its cache reads, so those count too.
+export async function fetchServiceRows(ids, env, deadline = Date.now() + SVC_DEADLINE_MS) {
   const settled = await Promise.allSettled(ids.map((id) => withDeadline(fetchOne(id, env, deadline), deadline)));
-  const services = settled.map((s, i) => (s.status === 'fulfilled' ? s.value
-    : { id: ids[i], label: SERVICES[ids[i]].label, state: 'unknown', note: 'Status unavailable', incidents: [] }))
+  const rows = new Map();
+  settled.forEach((s, i) => {
+    if (s.status === 'fulfilled') rows.set(ids[i], s.value);
+    // The only trace a failed provider leaves besides its unknown row: the host,
+    // attempts and HTTP status fetchJson put in the message, or the deadline.
+    else console.warn(`[svcstatus] ${ids[i]} ${String(s.reason?.message ?? s.reason)}`);
+  });
+  return rows;
+}
+
+// The digest the board reads, in the order the ids were asked for. rowOf(id)
+// returns that provider's mapped row, or nothing when there is none to show,
+// which renders as the unknown row.
+export function serviceDigest(ids, rowOf) {
+  const services = ids.map((id) => {
+    const row = rowOf(id);
+    return row ? { id, label: SERVICES[id].label, ...row }
+      : { id, label: SERVICES[id].label, state: 'unknown', note: 'Status unavailable', incidents: [] };
+  })
     // An unknown row ALWAYS says why. The card prints .svc__note in amber under
     // an unknown state, so a mapper that returned a blank note (an unrecognized
     // schema used to) drew an empty amber line and told the reader nothing.
@@ -690,6 +763,12 @@ export const MEND_MAX_AGE_S = 3600;
 // whole card of grey because one provider bounced is a worse lie than a row
 // that is one poll behind. Keeps partial: true (short cache, never overwrites
 // the backup it borrowed from) and adds mended: true for diagnosability.
+//
+// The age is the backup's updatedAt, applied to every row in it, which is only
+// honest because the route stamps a digest with its OLDEST row's fetch time
+// (rows come from a shared map and may be up to a TTL older than the digest
+// that carries them; see fetchServices in index.js). Stamping the assembly time
+// instead would let a row past MEND_MAX_AGE_S slip through by up to that TTL.
 export function mendServiceStatuses(fresh, stale) {
   const age = Math.floor(Date.now() / 1000) - Number(stale?.updatedAt);
   if (!Number.isFinite(age) || age > MEND_MAX_AGE_S) return fresh;

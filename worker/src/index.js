@@ -3,7 +3,7 @@
 // nothing served here is sensitive, and the boards fetch from a static origin.
 
 import { mapYahooChart } from './markets.js';
-import { sharedMapGet } from './sharedmap.js';
+import { sharedMapGet, freshForOldest, OLDEST_FETCHED_MS } from './sharedmap.js';
 import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
 import { fetchBusStops, parseLegs } from './bus.js';
@@ -14,7 +14,7 @@ import { fetchFerryDepartures } from './ferry.js';
 import { fetchSubstackPosts } from './posts.js';
 import { fetchIcloudAlbum } from './icloud.js';
 import { fetchGdriveAlbum } from './gdrive.js';
-import { fetchServiceStatuses, mendServiceStatuses, SERVICES } from './svcstatus.js';
+import { fetchServiceRows, serviceDigest, mendServiceStatuses, SERVICES, SVC_DEADLINE_MS } from './svcstatus.js';
 import { fetchApod } from './apod.js';
 import { fetchCitibike } from './citibike.js';
 import { fetchTfl } from './tfl.js';
@@ -354,21 +354,10 @@ const DEFAULT_SYMBOLS = Object.keys(INDEX_NAMES);
 // t=0 restarted the clock and served the t=0 quote as fresh until t=899.
 const MARKETS_TTL_S = 450;
 
-// The oldest included quote's fetch time in ms, riding on the digest under a
-// symbol key: JSON.stringify skips symbol keys, so the served body is unchanged,
-// while stamped()'s spread copies it through to marketsFreshS. updatedAt is the
-// same instant floored to whole seconds, too coarse here: a watchlist fetched
-// entirely in this request would read as up to a second old and cache for 449s
-// or 450s at random.
-const OLDEST_QUOTE_MS = Symbol('oldest quote fetchedAt (ms)');
-
-// cached()'s ttlS for /markets: what remains of the oldest quote's fresh life
-// (cached() rounds it and floors it at MIN_FRESH_S). updatedAt is the fallback
-// should the symbol ever be lost on the way (a mend() would build a new object).
-const marketsFreshS = (digest) => {
-  const oldestMs = digest[OLDEST_QUOTE_MS] ?? digest.updatedAt * 1000;
-  return Math.min(MARKETS_TTL_S, (oldestMs + MARKETS_TTL_S * 1000 - Date.now()) / 1000);
-};
+// cached()'s ttlS for /markets: what remains of the oldest quote's fresh life,
+// read from the OLDEST_FETCHED_MS stamp fetchMarkets leaves on the digest (see
+// sharedmap.js). cached() rounds it and floors it at MIN_FRESH_S.
+const marketsFreshS = freshForOldest(MARKETS_TTL_S);
 
 // Fleet-wide per-symbol layer under the per-watchlist cached() entry (see
 // sharedmap.js). The route caches per whole sorted watchlist, so before this a
@@ -446,7 +435,78 @@ async function fetchMarkets(origin, symbols) {
   // instant, unrounded, bounds how long cached() keeps the list fresh.
   const oldestMs = Math.min(...held.map((q) => q.fetchedAt));
   const updatedAt = Math.floor(oldestMs / 1000);
-  return { updatedAt, indices, ...(partial && { partial: true }), [OLDEST_QUOTE_MS]: oldestMs };
+  return { updatedAt, indices, ...(partial && { partial: true }), [OLDEST_FETCHED_MS]: oldestMs };
+}
+
+// /services/status TTL: 480s ≈ 1.5x the card's 5-minute poll (a TTL at or under
+// the poll expires just before every request, so a lone board never hit the
+// cache). Like MARKETS_TTL_S it is one ROW's whole fresh life, counted from its
+// upstream fetch: the shared row map reuses a provider's row for that long, and
+// a per-set entry built from it stays fresh only for what is left (svcFreshS).
+const SVC_TTL_S = 480;
+const svcFreshS = freshForOldest(SVC_TTL_S);
+
+// Fleet-wide per-provider layer under the per-set cached() entry (see
+// sharedmap.js). The route caches per sorted id set, so a board following
+// {github, aws} and one following {github, slack} each downloaded githubstatus,
+// and every distinct set re-parsed the heavy feeds (Google's incidents.json is
+// ~410 KB, AWS's UTF-16 data.json ~231 KB). Now each provider is fetched at most
+// once per SVC_TTL_S per colo, whatever sets it appears in.
+// The map holds the DIGESTED rows, never upstream bodies: measured from the
+// recorded fixtures a row is 60 B to 1.3 KB, and a pathological one (three
+// incidents at every clamp, or Microsoft's six incidents plus eight advisories)
+// about 10 KB. One entry per provider, so the cap is the registry's size and
+// never evicts a live provider. Even eleven pathological rows (~110 KB) are a
+// quarter of the one Google body a miss used to parse; a real entry is a few KB.
+const SVC_MAP = 'svc:rows';
+const SVC_MAP_MAX = Object.keys(SERVICES).length;
+
+// Subrequest budget for one /services/status miss, worst case (Free plan: 50,
+// fetch() and Cache API calls counted together). Every one of the 11 providers
+// (the route cap, and the whole registry) missing the row map, each succeeding
+// only on its last attempt. Only a 5xx, a network error or a 200 with the wrong
+// body spends a retry; a 4xx ends a source after one request (see fetchJson),
+// so a feed that 403s or 429s costs 1 here, not 3:
+//   cached(): fresh match                                         1
+//   row map: match                                                1
+//   10 single-feed providers x 3 attempts                        30
+//   m365: consumer feed + mirror, x 3 attempts each               6
+//   m365 tenant, only with the MS_* secrets set: token x 2
+//     + health x 2 (a warm isolate reuses its token: 2)           4
+//   row map: put                                                  1
+//   cached(): fresh put + stale put (a complete digest), or
+//     mend's stale match + fresh put (a partial one)              2
+//                                                               ----
+//                                                                45
+// A total wipeout instead costs 1 + 1 + 40 + the stale match = 43 (nothing to
+// put in the map). Adding a provider, an attempt or a source breaks this
+// budget: re-count before touching any of them.
+async function fetchServices(origin, ids, env) {
+  // Started before the map read, so the fan-out's deadline covers it too.
+  const deadline = Date.now() + SVC_DEADLINE_MS;
+  // A provider that answered but could only say 'unknown' (a mapper that did
+  // not recognize the payload) is shown as it said so, exactly as before the
+  // map existed, but is not stored: the map holds good rows only, so the next
+  // request retries it rather than reusing a non-answer for a whole TTL.
+  const unknown = new Map();
+  const held = await sharedMapGet(origin, SVC_MAP, ids, async (missing) => {
+    const rows = await fetchServiceRows(missing, env, deadline);
+    for (const [id, row] of rows) {
+      if (row.state === 'unknown') {
+        unknown.set(id, row);
+        rows.delete(id);
+      }
+    }
+    return rows;
+  }, { freshS: SVC_TTL_S, maxEntries: SVC_MAP_MAX });
+  // A provider that failed outright is absent from both and renders as the
+  // unknown row, which marks the digest partial: the per-set entry then caches
+  // briefly, never replaces its 24h backup, and gets mended from it.
+  // serviceDigest throws when every row is unknown, so past it at least one row
+  // was held, and the oldest of them is the digest's "as of".
+  const digest = serviceDigest(ids, (id) => held.get(id)?.value ?? unknown.get(id));
+  const oldestMs = Math.min(...[...held.values()].map((e) => e.fetchedAt));
+  return { updatedAt: Math.floor(oldestMs / 1000), ...digest, [OLDEST_FETCHED_MS]: oldestMs };
 }
 
 // In-process dispatcher for the health monitor. A Worker fetching its OWN
@@ -623,16 +683,16 @@ const handlers = {
     if (path === '/services/status' && request.method === 'GET') {
       const ids = [...new Set((url.searchParams.get('ids') ?? '').split(',').filter((id) => Object.hasOwn(SERVICES, id)))].slice(0, 11);
       if (!ids.length) return json({ error: 'bad_ids' }, 400);
-      // Sorted ids in the key so permutations share one cache entry. 480s is
-      // ~1.5x the card's 5-minute poll: a TTL at or under the poll interval
-      // expires just before every request, so a lone board never hit the cache.
+      // Sorted ids in the key so permutations share one cache entry, whose
+      // fresh lifetime is its oldest row's remaining one (see SVC_TTL_S), with
+      // each provider fetched once per TTL fleet-wide underneath it.
       // mend: one provider's dead endpoint leaves an unknown row and marks the
       // digest partial; the backup fills that row back in rather than showing a
       // grey card (see mendServiceStatuses for the age bound on that).
       // env rides along for the optional MS_* tenant secrets (see the Graph
       // block in svcstatus.js); with none set the fetch is byte-identical to
       // the keyless one this route shipped with.
-      return cached(url.origin, `svc:${[...ids].sort().join(',')}`, 480, () => fetchServiceStatuses(ids, env), { mend: mendServiceStatuses });
+      return cached(url.origin, `svc:${[...ids].sort().join(',')}`, svcFreshS, () => fetchServices(url.origin, ids, env), { mend: mendServiceStatuses });
     }
 
     // Golf and Tennis: 450s ≈ 1.5x the cards' 5-minute poll.

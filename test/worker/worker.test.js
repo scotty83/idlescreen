@@ -15,7 +15,7 @@ import { newsFeedUrl } from '../../worker/src/news.js';
 import { parseLegs, siriUrl } from '../../worker/src/bus.js';
 import { njtDateToEpoch } from '../../worker/src/njt.js';
 import { mapMtaAlerts } from '../../worker/src/alerts.js';
-import { resetGraphToken, fetchServiceStatuses, SVC_DEADLINE_MS } from '../../worker/src/svcstatus.js';
+import { resetGraphToken, fetchServiceRows, serviceDigest, SVC_DEADLINE_MS, SERVICES } from '../../worker/src/svcstatus.js';
 import STATISTA from './fixtures/statista-cotd.html?raw';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
 
@@ -36,6 +36,9 @@ const clearCache = (key) =>
 // entries (see sharedmap.js). Cleared after every case, so a quote one case
 // fetched can never answer another case's symbol.
 const quoteMapKey = new Request('https://api.test/__cache/map/mkt%3Aquotes');
+// /services/status keeps the same kind of per-provider row map under its
+// per-set entries, cleared after every case for the same reason.
+const svcMapKey = new Request('https://api.test/__cache/map/svc%3Arows');
 
 // /njt/departures keys its entry by the New York service day (see the route).
 const njtKey = () => `njt:${nyDate()}`;
@@ -57,7 +60,8 @@ function stubFetch(routes) {
         status: route.status ?? 200,
         // `ctype` overrides for the feeds that answer 200 with the WRONG type
         // (Microsoft's hosts serve HTML error pages that way).
-        headers: { 'Content-Type': route.ctype ?? (route.raw ? 'application/x-protobuf' : 'application/json') },
+        // `headers` adds any others a case needs (a 429's Retry-After).
+        headers: { 'Content-Type': route.ctype ?? (route.raw ? 'application/x-protobuf' : 'application/json'), ...route.headers },
       },
     );
   });
@@ -71,6 +75,7 @@ afterEach(async () => {
   await env.CODES.delete('njt:schedule'); // the durable day-timetable store
   await clearCache(njtKey()); // and the route's own cache entry (fresh + backup + backoff)
   await caches.default.delete(quoteMapKey);
+  await caches.default.delete(svcMapKey);
   resetGraphToken(); // clears the isolate's Microsoft Graph token memo
 });
 
@@ -2234,15 +2239,92 @@ describe('/services/status route', () => {
   });
 
   it('retries a flapping source before reporting unknown', async () => {
+    // The mirror is down too, so the row stands or falls on the consumer
+    // feed's retry: a 5xx is a server having a bad moment, worth a second ask.
     await clearCache('svc:m365');
-    stubFetch([
-      { match: /status\.cloud\.microsoft/, body: { Message: 'No HTTP resource was found' }, status: 404, times: 1 },
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'busy', status: 503, times: 1 },
       { match: /status\.cloud\.microsoft/, body: m365Fx },
-      { match: /aguidetocloud/, body: allGreenMirror() },
+      { match: /aguidetocloud/, body: 'down', status: 500, times: 3 },
     ]);
     const digest = await (await call('/services/status?ids=m365')).json();
     expect(digest.services[0]).toMatchObject({ id: 'm365', state: 'ok' });
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(2);
     await clearCache('svc:m365');
+  });
+
+  // A 4xx is the server's considered answer and a retry 250 ms later draws the
+  // same one. Microsoft's consumer feed answered ~40% 4xx to Cloudflare egress,
+  // and every one of those used to be asked three times.
+  it.each([403, 404, 429])('asks once, not three times, when a feed answers %i', async (status) => {
+    await clearCache('svc:m365');
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'no', status, times: 3 },
+      { match: /aguidetocloud/, body: allGreenMirror() },
+    ]);
+    const digest = await (await call('/services/status?ids=m365')).json();
+    expect(digest.services[0].state).toBe('ok'); // the mirror still carries the row
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(1);
+    await clearCache('svc:m365');
+  });
+
+  it('still retries a 408, the one 4xx a second ask can fix', async () => {
+    await clearCache('svc:m365');
+    const calls = stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'slow', status: 408, times: 1 },
+      { match: /status\.cloud\.microsoft/, body: m365Fx },
+      { match: /aguidetocloud/, body: 'down', status: 500, times: 3 },
+    ]);
+    const digest = await (await call('/services/status?ids=m365')).json();
+    expect(digest.services[0].state).toBe('ok');
+    expect(calls.filter((u) => /status\.cloud\.microsoft/.test(u))).toHaveLength(2);
+    await clearCache('svc:m365');
+  });
+
+  it('logs which host answered which status, never the body', async () => {
+    // Workers Logs are the only place to tell a WAF 403 from a rate-limit 429.
+    await clearCache('svc:github,m365');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubFetch([
+      { match: /status\.cloud\.microsoft/, body: 'SECRET-BODY-TEXT', status: 429, headers: { 'Retry-After': '30' } },
+      { match: /aguidetocloud/, body: allGreenMirror() },
+      { match: /githubstatus/, body: 'OTHER-BODY-TEXT', status: 503, times: 3 },
+    ]);
+    await call('/services/status?ids=github,m365');
+    const logged = warn.mock.calls.flat().map(String).join('\n');
+    warn.mockRestore();
+    expect(logged).toContain('[svcstatus] m365 source status.cloud.microsoft failed after 1 attempt: HTTP 429 (retry-after 30)');
+    expect(logged).toContain('[svcstatus] github www.githubstatus.com failed after 3 attempts: HTTP 503');
+    expect(logged).not.toContain('BODY-TEXT');
+    await clearCache('svc:github,m365');
+  });
+
+  it('a 200 that is not JSON is retried and logged without quoting the body', async () => {
+    // The parser's own error quotes what it choked on (`Unexpected token 'S',
+    // "SECRET-BODY-TEXT" is not valid JSON`), and that message used to ride
+    // straight into the log line. GitHub takes the res.json() path, AWS the
+    // UTF-16 decodeBomJson one; both must say only what kind of body it was.
+    await clearCache('svc:github,aws,slack');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const calls = stubFetch([
+      { match: /githubstatus/, body: 'SECRET-BODY-TEXT', times: 3 },
+      { match: /status\.aws\.amazon\.com/, body: 'SECRET-BODY-TEXT', times: 3 },
+      { match: /status\.slack\.com/, body: slackFx },
+    ]);
+    const text = await (await call('/services/status?ids=github,aws,slack')).text();
+    const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+    warn.mockRestore();
+    error.mockRestore();
+    // Still a failed attempt like any other: three asks each, then unknown.
+    expect(calls.filter((u) => /githubstatus/.test(u))).toHaveLength(3);
+    expect(calls.filter((u) => /status\.aws\.amazon\.com/.test(u))).toHaveLength(3);
+    expect(JSON.parse(text).services.find((s) => s.id === 'github').state).toBe('unknown');
+    expect(logged).toContain('[svcstatus] github www.githubstatus.com failed after 3 attempts: invalid JSON body (application/json)');
+    expect(logged).toContain('[svcstatus] aws status.aws.amazon.com failed after 3 attempts: invalid JSON body (application/json)');
+    expect(logged).not.toContain('SECRET-BODY-TEXT');
+    expect(text).not.toContain('SECRET-BODY-TEXT');
+    await clearCache('svc:github,aws,slack');
   });
 
   it('m365 reads both feeds and reports the outage an office would feel', async () => {
@@ -2300,7 +2382,9 @@ describe('/services/status route', () => {
     expect(first.services[0].note).toBe('Exchange Online: service degradation');
     expect(first.partial).toBeUndefined();
 
+    // The next poll after the TTL: the per-set entry and the row map both lapse.
     await clearCache('svc:m365');
+    await caches.default.delete(svcMapKey);
     const second = await (await call('/services/status?ids=m365', undefined, MS_ENV)).json();
     expect(second.services[0].state).toBe('minor');
     // Two polls, two Graph reads, ONE token: the memo survives between them.
@@ -2321,6 +2405,7 @@ describe('/services/status route', () => {
     ]);
     await call('/services/status?ids=m365', undefined, MS_ENV);
     await clearCache('svc:m365');
+    await caches.default.delete(svcMapKey);
     await call('/services/status?ids=m365', undefined, MS_ENV);
     expect(loginCalls(calls)).toHaveLength(2);
     await clearCache('svc:m365');
@@ -2355,6 +2440,29 @@ describe('/services/status route', () => {
     await clearCache('svc:m365');
   });
 
+  // Same rule for the tenant's two calls: a 200 that will not parse names its
+  // media type, never its content (a token answer's body is where a credential
+  // would be sitting). An AAD error that is prose, not a code, stays out too.
+  it.each([
+    ['token', [{ match: /login\.microsoftonline\.com/, body: 'SECRET-BODY-TEXT', times: 9 }]],
+    ['health', [{ match: /graph\.microsoft\.com/, body: 'SECRET-BODY-TEXT', times: 9 }]],
+    ['token HTTP 400', [{ match: /login\.microsoftonline\.com/, body: { error: 'SECRET-BODY-TEXT here' }, status: 400, times: 9 }]],
+  ])('a tenant %s failure logs no body text', async (label, extra) => {
+    await clearCache('svc:m365');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tenantStubs(extra);
+    const text = await (await call('/services/status?ids=m365', undefined, MS_ENV)).text();
+    const logged = warn.mock.calls.flat().map(String).join(' ');
+    warn.mockRestore();
+    expect(JSON.parse(text).services[0].state).toBe('ok'); // the public feeds carry the row
+    expect(logged).toContain(label.includes('HTTP')
+      ? '[svcstatus] m365 graph token HTTP 400'
+      : `[svcstatus] m365 graph ${label} invalid JSON body (application/json)`);
+    expect(logged).not.toContain('SECRET-BODY-TEXT');
+    expect(text).not.toContain('SECRET-BODY-TEXT');
+    await clearCache('svc:m365');
+  });
+
   it('a tenant answering a shape we do not understand is ABSENT, not green', async () => {
     await clearCache('svc:m365');
     stubFetch([
@@ -2385,6 +2493,7 @@ describe('/services/status route', () => {
     // Two of three secrets is a half-finished setup, not a tenant: it stays
     // keyless rather than 401ing against Microsoft every poll.
     await clearCache('svc:m365');
+    await caches.default.delete(svcMapKey);
     const half = stubFetch([
       { match: /status\.cloud\.microsoft/, body: m365Fx, times: 9 },
       { match: /aguidetocloud/, body: freshMirror(), times: 9 },
@@ -2430,7 +2539,9 @@ describe('/services/status route', () => {
     expect(healthy.headers.get('cache-control')).toBe('public, max-age=480');
     expect((await healthy.json()).partial).toBeUndefined();
 
+    // Expire the fresh copy and, on the same clock, the per-provider rows.
     await caches.default.delete(cacheKey('fresh', 'svc:m365,slack'));
+    await caches.default.delete(svcMapKey);
     stubFetch([
       { match: /status\.cloud\.microsoft/, body: 'down', status: 500, times: 3 },
       { match: /aguidetocloud/, body: 'down', status: 500, times: 3 },
@@ -2456,6 +2567,7 @@ describe('/services/status route', () => {
     ]);
     await call('/services/status?ids=m365,slack'); // populates the 24h backup
     await caches.default.delete(cacheKey('fresh', 'svc:m365,slack'));
+    await caches.default.delete(svcMapKey);
 
     stubFetch([
       { match: /status\.cloud\.microsoft/, body: 'down', status: 500, times: 3 },
@@ -2496,9 +2608,150 @@ describe('/services/status route', () => {
     expect(digest.services[1].incidents).toEqual([]);
   });
 
+  // The per-provider layer (sharedmap.js). The route caches per sorted id set,
+  // so before it a provider common to many sets was downloaded and parsed once
+  // per distinct set, the heavy feeds (Google ~410 KB, AWS ~231 KB) included.
+  const svcRows = async () => (await (await caches.default.match(svcMapKey))?.json())?.entries ?? {};
+  const seedSvcRows = (entries) => caches.default.put(svcMapKey, new Response(JSON.stringify({ entries }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=86400' },
+  }));
+
+  it('fetches a provider shared by two id sets once, and keeps only its digested row', async () => {
+    await Promise.all([clearCache('svc:github,zoom'), clearCache('svc:github,slack')]);
+    const calls = stubFetch([
+      { match: /githubstatus/, body: spBad, times: 2 },
+      { match: /status\.zoom\.us/, body: spOk },
+      { match: /status\.slack\.com/, body: slackFx },
+    ]);
+    const one = await (await call('/services/status?ids=github,zoom')).json();
+    const two = await (await call('/services/status?ids=slack,github')).json();
+    expect(calls.filter((u) => /githubstatus/.test(u))).toHaveLength(1);
+    expect(two.services.map((s) => s.id)).toEqual(['slack', 'github']); // request order kept
+    expect(two.services[1]).toEqual(one.services[0]); // the very same row
+    // What the map keeps is the mapped row alone: no raw upstream body, and no
+    // id or label (the digest adds those from the registry).
+    const { id, label, ...row } = one.services[0];
+    expect((await svcRows()).github.value).toEqual(row);
+    await Promise.all([clearCache('svc:github,zoom'), clearCache('svc:github,slack')]);
+  });
+
+  it('never stores a failed or unknown row, so the next set asks that provider again', async () => {
+    await Promise.all([clearCache('svc:github,slack,zoom'), clearCache('svc:github,zoom')]);
+    stubFetch([
+      { match: /githubstatus/, body: 'down', status: 500, times: 3 },
+      // Zoom answers, but in a vocabulary the mapper doesn't know: unknown.
+      { match: /status\.zoom\.us/, body: { status: { indicator: 'brand-new', description: 'Hmm' } } },
+      { match: /status\.slack\.com/, body: slackFx },
+    ]);
+    const first = await (await call('/services/status?ids=github,slack,zoom')).json();
+    expect(first.partial).toBe(true);
+    expect(first.services.find((s) => s.id === 'github')).toMatchObject({ state: 'unknown', note: 'Status unavailable' });
+    // The unknown row still reads as its mapper said it, exactly as before.
+    expect(first.services.find((s) => s.id === 'zoom')).toMatchObject({ state: 'unknown', note: 'Hmm' });
+    expect(Object.keys(await svcRows())).toEqual(['slack']);
+
+    const calls = stubFetch([
+      { match: /githubstatus/, body: spOk },
+      { match: /status\.zoom\.us/, body: spOk },
+    ]);
+    const second = await (await call('/services/status?ids=zoom,github')).json();
+    expect(calls).toHaveLength(2); // both asked again, neither served from the map
+    expect(second.partial).toBeUndefined();
+    expect(second.services.map((s) => s.state)).toEqual(['ok', 'ok']);
+    await Promise.all([clearCache('svc:github,slack,zoom'), clearCache('svc:github,zoom')]);
+  });
+
+  it('keeps a set fresh only as long as its oldest reused row, and dates it by that row', async () => {
+    // GitHub's row fetched at t=0 by some other set; this uncached set is
+    // assembled around it at t=479. Without the cap the entry would restart the
+    // clock and serve the t=0 row as fresh until t=959.
+    const key = 'svc:github,slack';
+    await clearCache(key);
+    const t0 = Date.now() - 479_000;
+    const old = { state: 'ok', note: 'All Systems Operational', incidents: [] };
+    await seedSvcRows({ github: { value: old, fetchedAt: t0 } });
+    const calls = stubFetch([{ match: /status\.slack\.com/, body: slackFx }]);
+    const res = await call('/services/status?ids=github,slack');
+    const digest = await res.json();
+    expect(calls).toHaveLength(1); // Slack only
+    expect(digest.services[0]).toEqual({ id: 'github', label: 'GitHub', ...old });
+    expect(res.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of GitHub's 480s
+    const entry = await caches.default.match(cacheKey('fresh', key));
+    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 480_000 + 500); // rounding slop
+    // "as of" is the oldest row's fetch, which is also the age the mend weighs
+    // the 24h backup by: a backup dated at assembly would let a row past
+    // MEND_MAX_AGE_S be lent out for up to a TTL longer.
+    expect(digest.updatedAt).toBe(Math.floor(t0 / 1000));
+    const backup = await caches.default.match(cacheKey('stale', key));
+    expect((await backup.json()).updatedAt).toBe(Math.floor(t0 / 1000));
+    await clearCache(key);
+  });
+
+  // Free plan: 50 subrequests per invocation, fetch() and Cache API match/put
+  // counted together. Pinned to the exact tally in the fetchServices comment
+  // (index.js), so a change that spends one more has to update that arithmetic.
+  describe('subrequest budget, worst case: all 11 providers, a tenant, every attempt spent', () => {
+    const ALL = Object.keys(SERVICES);
+    const FEEDS = [
+      [/status\.zoom\.us/, spOk], [/status\.ui\.com/, spOk], [/cloudflarestatus/, spOk],
+      [/githubstatus/, spOk], [/status\.slack\.com/, slackFx], [/google\.com\/appsstatus/, googleFx],
+      [/service-status\.webex\.com/, webexFx], [/status\.aws\.amazon\.com/, awsFx],
+      [/status\.claude\.com/, claudeFx], [/status\.openai\.com/, openaiFx],
+    ];
+    const count = async (routes) => {
+      await clearCache(`svc:${[...ALL].sort().join(',')}`);
+      const calls = stubFetch(routes);
+      const match = vi.spyOn(caches.default, 'match');
+      const put = vi.spyOn(caches.default, 'put');
+      const res = await call(`/services/status?ids=${ALL.join(',')}`, undefined, MS_ENV);
+      const spent = calls.length + match.mock.calls.length + put.mock.calls.length;
+      match.mockRestore();
+      put.mockRestore();
+      await clearCache(`svc:${[...ALL].sort().join(',')}`);
+      return { res, calls, spent };
+    };
+    // Two failures, then the answer: every retry spent, and nothing lost.
+    const lastTry = (match, body, fails = 2) => [{ match, body: 'down', status: 500, times: fails }, { match, body }];
+    // A function, not a shared table: stubFetch spends each route's `times` in place.
+    const tenantOnSecondTry = () => [
+      ...lastTry(/login\.microsoftonline\.com/, { access_token: 't', expires_in: 3599 }, 1),
+      ...lastTry(/graph\.microsoft\.com/, m365GraphFx, 1),
+    ];
+
+    it('a complete digest: every provider answers on its last attempt', async () => {
+      const { res, calls, spent } = await count([
+        ...FEEDS.flatMap(([m, body]) => lastTry(m, body)),
+        ...lastTry(/status\.cloud\.microsoft/, m365Fx),
+        ...lastTry(/aguidetocloud/, allGreenMirror()),
+        ...tenantOnSecondTry(),
+      ]);
+      const digest = await res.json();
+      expect(digest.services).toHaveLength(11);
+      expect(digest.partial).toBeUndefined();
+      expect(calls).toHaveLength(40);
+      expect(spent).toBe(45);
+      expect(spent).toBeLessThan(50);
+    });
+
+    it('a partial digest: every public feed dead, the tenant alone carrying Microsoft', async () => {
+      const dead = (match) => ({ match, body: 'down', status: 500, times: 3 });
+      const { res, calls, spent } = await count([
+        ...FEEDS.map(([m]) => dead(m)),
+        dead(/status\.cloud\.microsoft/),
+        dead(/aguidetocloud/),
+        ...tenantOnSecondTry(),
+      ]);
+      const digest = await res.json();
+      expect(digest.partial).toBe(true);
+      expect(digest.services.find((s) => s.id === 'm365').state).toBe('minor');
+      expect(calls).toHaveLength(40);
+      expect(spent).toBe(45); // the stale put becomes the mend's stale match
+    });
+  });
+
   it('abandons a hung provider at the deadline so the answered rows still ship (F13)', async () => {
     // Slack answers instantly; GitHub hangs forever and ignores its abort signal.
-    // Before the overall deadline, fetchServiceStatuses waited on the slowest
+    // Before the overall deadline, the fan-out waited on the slowest
     // source, so one hung provider held the whole digest past the board's 15s
     // fetch and health's 13s probe and failed the entire card. Now the fan-out
     // returns at SVC_DEADLINE_MS with GitHub marked unknown (=> partial) and
@@ -2512,9 +2765,11 @@ describe('/services/status route', () => {
         }
         return new Promise(() => {}); // github: never resolves, never honours the abort
       }));
-      const pending = fetchServiceStatuses(['slack', 'github'], env);
+      const pending = fetchServiceRows(['slack', 'github'], env);
       await vi.advanceTimersByTimeAsync(SVC_DEADLINE_MS + 1000);
-      const digest = await pending;
+      const rows = await pending;
+      expect([...rows.keys()]).toEqual(['slack']); // the abandoned provider is simply absent
+      const digest = serviceDigest(['slack', 'github'], (id) => rows.get(id));
       expect(digest.services.find((s) => s.id === 'slack').state).toBe('ok');
       expect(digest.services.find((s) => s.id === 'github').state).toBe('unknown');
       expect(digest.partial).toBe(true); // a provider that didn't finish makes the digest partial
