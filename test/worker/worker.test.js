@@ -2299,6 +2299,34 @@ describe('/services/status route', () => {
     await clearCache('svc:github,m365');
   });
 
+  it('a 200 that is not JSON is retried and logged without quoting the body', async () => {
+    // The parser's own error quotes what it choked on (`Unexpected token 'S',
+    // "SECRET-BODY-TEXT" is not valid JSON`), and that message used to ride
+    // straight into the log line. GitHub takes the res.json() path, AWS the
+    // UTF-16 decodeBomJson one; both must say only what kind of body it was.
+    await clearCache('svc:github,aws,slack');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const calls = stubFetch([
+      { match: /githubstatus/, body: 'SECRET-BODY-TEXT', times: 3 },
+      { match: /status\.aws\.amazon\.com/, body: 'SECRET-BODY-TEXT', times: 3 },
+      { match: /status\.slack\.com/, body: slackFx },
+    ]);
+    const text = await (await call('/services/status?ids=github,aws,slack')).text();
+    const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+    warn.mockRestore();
+    error.mockRestore();
+    // Still a failed attempt like any other: three asks each, then unknown.
+    expect(calls.filter((u) => /githubstatus/.test(u))).toHaveLength(3);
+    expect(calls.filter((u) => /status\.aws\.amazon\.com/.test(u))).toHaveLength(3);
+    expect(JSON.parse(text).services.find((s) => s.id === 'github').state).toBe('unknown');
+    expect(logged).toContain('[svcstatus] github www.githubstatus.com failed after 3 attempts: invalid JSON body (application/json)');
+    expect(logged).toContain('[svcstatus] aws status.aws.amazon.com failed after 3 attempts: invalid JSON body (application/json)');
+    expect(logged).not.toContain('SECRET-BODY-TEXT');
+    expect(text).not.toContain('SECRET-BODY-TEXT');
+    await clearCache('svc:github,aws,slack');
+  });
+
   it('m365 reads both feeds and reports the outage an office would feel', async () => {
     await clearCache('svc:m365');
     stubFetch([
@@ -2409,6 +2437,29 @@ describe('/services/status route', () => {
     expect(logged).not.toContain(MS_ENV.MS_TENANT_ID); // no URL in the line either
     expect(logged).not.toContain('Bearer');
     warn.mockRestore();
+    await clearCache('svc:m365');
+  });
+
+  // Same rule for the tenant's two calls: a 200 that will not parse names its
+  // media type, never its content (a token answer's body is where a credential
+  // would be sitting). An AAD error that is prose, not a code, stays out too.
+  it.each([
+    ['token', [{ match: /login\.microsoftonline\.com/, body: 'SECRET-BODY-TEXT', times: 9 }]],
+    ['health', [{ match: /graph\.microsoft\.com/, body: 'SECRET-BODY-TEXT', times: 9 }]],
+    ['token HTTP 400', [{ match: /login\.microsoftonline\.com/, body: { error: 'SECRET-BODY-TEXT here' }, status: 400, times: 9 }]],
+  ])('a tenant %s failure logs no body text', async (label, extra) => {
+    await clearCache('svc:m365');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tenantStubs(extra);
+    const text = await (await call('/services/status?ids=m365', undefined, MS_ENV)).text();
+    const logged = warn.mock.calls.flat().map(String).join(' ');
+    warn.mockRestore();
+    expect(JSON.parse(text).services[0].state).toBe('ok'); // the public feeds carry the row
+    expect(logged).toContain(label.includes('HTTP')
+      ? '[svcstatus] m365 graph token HTTP 400'
+      : `[svcstatus] m365 graph ${label} invalid JSON body (application/json)`);
+    expect(logged).not.toContain('SECRET-BODY-TEXT');
+    expect(text).not.toContain('SECRET-BODY-TEXT');
     await clearCache('svc:m365');
   });
 

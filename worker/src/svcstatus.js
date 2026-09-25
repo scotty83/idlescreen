@@ -482,6 +482,24 @@ const isFinalStatus = (status) => status >= 400 && status < 500 && status !== 40
 export const SVC_DEADLINE_MS = 12000; // under 13s, leaving margin for serialize + cache writes
 const MIN_ATTEMPT_MS = 1200; // don't open an attempt (or retry) with less budget than this
 
+// Every failure message in this file ends up in a log line (fetchServiceRows,
+// the m365 block), and a JSON parser's error quotes the very text it choked on:
+// `Unexpected token 'S', "SECRET..." is not valid JSON`. So a body that will not
+// parse fails with a fixed diagnostic naming its media type and nothing of its
+// content. Any other error from reading the body (a timeout or a dropped
+// connection mid-stream) passes through as is: it says nothing about what the
+// upstream sent. `what` prefixes the message the way the Graph calls label
+// theirs ('token', 'health').
+async function readJson(read, ctype, what) {
+  try {
+    return await read();
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) throw e;
+    const media = ctype.split(';')[0].trim() || 'no content-type';
+    throw new Error(`${what ? `${what} ` : ''}invalid JSON body (${media})`);
+  }
+}
+
 async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
   let lastErr;
   let attempts = 0;
@@ -511,7 +529,8 @@ async function fetchJson(url, { binary = false, deadline = Infinity } = {}) {
       const ctype = res.headers.get('content-type') ?? '';
       if (/text\/html/i.test(ctype)) throw new Error(`HTML body (content-type ${ctype})`);
       // AWS is UTF-16-with-BOM (see decodeBomJson); everything else is plain JSON.
-      return binary ? decodeBomJson(await res.arrayBuffer()) : await res.json();
+      // A malformed body is still a failed attempt, so it still retries.
+      return await readJson(async () => (binary ? decodeBomJson(await res.arrayBuffer()) : res.json()), ctype);
     } catch (e) {
       lastErr = e;
       if (e.final) break;
@@ -589,10 +608,14 @@ async function graphAccessToken(env) {
         signal: AbortSignal.timeout(attempt ? 4000 : 8000),
       });
       if (!res.ok) {
-        const code = await res.json().then((j) => (typeof j?.error === 'string' ? j.error : null)).catch(() => null);
+        // Only something shaped like a code ('invalid_client') is taken; a free-
+        // text `error` would be body prose riding into the log.
+        const code = await res.json().then((j) => (typeof j?.error === 'string' && /^[a-z0-9_]{1,64}$/i.test(j.error) ? j.error : null)).catch(() => null);
         throw new Error(`token HTTP ${res.status}${code ? ` (${code})` : ''}`);
       }
-      const j = await res.json();
+      // A 200 that will not parse must not quote itself into the log: the body of
+      // a token answer is the one place a credential could be sitting.
+      const j = await readJson(() => res.json(), res.headers.get('content-type') ?? '', 'token');
       if (typeof j?.access_token !== 'string' || !j.access_token) throw new Error('token response missing access_token');
       // expires_in is SECONDS from now, counted from the answer landing rather
       // than from when we started asking.
@@ -626,8 +649,9 @@ async function fetchGraphHealth(env) {
       }
       // Same lesson as fetchJson: Microsoft's hosts answer 200 with an HTML
       // consent/error page often enough that the body has to be checked.
-      if (/text\/html/i.test(res.headers.get('content-type') ?? '')) throw new Error('health HTML body');
-      return await res.json();
+      const ctype = res.headers.get('content-type') ?? '';
+      if (/text\/html/i.test(ctype)) throw new Error('health HTML body');
+      return await readJson(() => res.json(), ctype, 'health');
     } catch (e) {
       lastErr = e;
       if (attempt < 1) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
