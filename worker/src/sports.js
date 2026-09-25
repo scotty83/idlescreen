@@ -125,6 +125,7 @@ async function cachedSchedLines(origin, lg, id, base, teamP) {
   }
   let lastLine = null;
   let nextLine = null;
+  let ok = false;
   try {
     const schedRes = await fetch(`${base}/schedule`, {
       headers: { 'User-Agent': ESPN_UA },
@@ -140,14 +141,18 @@ async function cachedSchedLines(origin, lg, id, base, teamP) {
       const abbr = teamJson?.team?.abbreviation || sched?.team?.abbreviation || '';
       lastLine = digestSchedule(sched, abbr);
       nextLine = digestNext(sched, abbr);
+      ok = true;
     }
   } catch {
     lastLine = null;
     nextLine = null;
   }
+  // A failure is cached too, so an outage is retried at most once a minute per
+  // team, but only for that minute: cached for the full half hour like a real
+  // result, one ESPN blip hid a team's last and next game for 30 minutes.
   if (key) {
     try {
-      await cache.put(key, new Response(JSON.stringify({ lastLine, nextLine }), { headers: { 'Cache-Control': 'max-age=1800' } }));
+      await cache.put(key, new Response(JSON.stringify({ lastLine, nextLine }), { headers: { 'Cache-Control': `max-age=${ok ? 1800 : 60}` } }));
     } catch {
       // best-effort
     }

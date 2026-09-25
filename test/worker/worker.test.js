@@ -1055,6 +1055,37 @@ describe('/sports/team team and schedule in parallel', () => {
   });
 });
 
+describe('/sports/team schedule-lines TTL', () => {
+  const TEAM = { team: { id: '10', abbreviation: 'NYY', shortDisplayName: 'Yankees', logos: [], nextEvent: [] } };
+  // Runs one summary with the given schedule answer and returns the
+  // Cache-Control the schedule lines were stored under.
+  const schedLinesTtl = async (schedRoutes) => {
+    await resetTeams('10');
+    stubFetch([{ match: /teams\/10$/, body: TEAM }, ...schedRoutes]);
+    const put = vi.spyOn(Object.getPrototypeOf(caches.default), 'put');
+    let calls;
+    try {
+      await fetchTeamSummary('mlb', '10', 'https://api.test');
+      calls = [...put.mock.calls];
+    } finally {
+      put.mockRestore();
+      await resetTeams('10');
+    }
+    const [, stored] = calls.find(([req]) => req.url.endsWith('/__cache/sched2/mlb:10'));
+    return stored.headers.get('cache-control');
+  };
+
+  it('holds a failed schedule for a minute, not half an hour', async () => {
+    expect(await schedLinesTtl([{ match: /teams\/10\/schedule$/, body: 'down', status: 503 }])).toBe('max-age=60');
+    // No schedule route: the stub throws, as a network failure or timeout would.
+    expect(await schedLinesTtl([])).toBe('max-age=60');
+  });
+
+  it('keeps a real result for half an hour, even one with no games in it', async () => {
+    expect(await schedLinesTtl([{ match: /teams\/10\/schedule$/, body: { events: [] } }])).toBe('max-age=1800');
+  });
+});
+
 describe('digestScoreboard', () => {
   it('keeps only the fields a row reads, keyed by event id, and leaves pre-game events out', () => {
     const sb = { events: [
