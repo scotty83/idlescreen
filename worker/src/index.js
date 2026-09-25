@@ -2,8 +2,8 @@
 // and market indices (/markets). Everything responds with permissive CORS —
 // nothing served here is sensitive, and the boards fetch from a static origin.
 
-import { mapYahooChart } from './markets.js';
-import { sharedMapGet, freshForOldest, OLDEST_FETCHED_MS } from './sharedmap.js';
+import { mapYahooChart, quoteFreshS, QUOTE_ACTIVE_S } from './markets.js';
+import { sharedMapGet, freshForEarliest, earliestFreshUntil, FRESH_UNTIL_MS } from './sharedmap.js';
 import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
 import { fetchBusStops, parseLegs } from './bus.js';
@@ -347,24 +347,27 @@ const YAHOO_UA =
 const INDEX_NAMES = { '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^GSPC': 'S&P 500' };
 const DEFAULT_SYMBOLS = Object.keys(INDEX_NAMES);
 
-// /markets TTL: 450s ≈ 1.5x the card's 5-minute poll (300s expired on every
-// request). It is one QUOTE's whole fresh life, counted from its Yahoo fetch:
-// the shared quote map below reuses a quote for that long, and a watchlist
-// entry built from it may serve it fresh only for what is left (marketsFreshS).
-// Without that second half, a list assembled at t=449 around a quote fetched at
-// t=0 restarted the clock and served the t=0 quote as fresh until t=899.
-const MARKETS_TTL_S = 450;
-
-// cached()'s ttlS for /markets: what remains of the oldest quote's fresh life,
-// read from the OLDEST_FETCHED_MS stamp fetchMarkets leaves on the digest (see
-// sharedmap.js). cached() rounds it and floors it at MIN_FRESH_S.
-const marketsFreshS = freshForOldest(MARKETS_TTL_S);
+// /markets freshness is per QUOTE, counted from its Yahoo fetch, and set by
+// whether its market is trading (quoteFreshS in markets.js): 240s while it
+// trades, fresher than the card's 5-minute poll on purpose, and up to 30 min
+// while it is closed and nothing on the card can move. The shared quote map
+// below reuses a quote for its life, and a watchlist entry built from quotes
+// lives only until the first of them expires (marketsFreshS). Without that
+// second half, a list assembled at t=239 around a quote fetched at t=0 would
+// restart the clock and serve the t=0 quote as fresh until t=479, and a list
+// mixing a closed market with an open one would hold the open one's quote for
+// the closed one's half hour.
+//
+// cached()'s ttlS for /markets: what remains until that first expiry, read from
+// the FRESH_UNTIL_MS stamp fetchMarkets leaves on the digest (see sharedmap.js).
+// cached() rounds it and floors it at MIN_FRESH_S.
+const marketsFreshS = freshForEarliest(QUOTE_ACTIVE_S);
 
 // Fleet-wide per-symbol layer under the per-watchlist cached() entry (see
 // sharedmap.js). The route caches per whole sorted watchlist, so before this a
 // symbol common to many watchlists was refetched from Yahoo once per distinct
-// list; now each symbol is fetched at most once per MARKETS_TTL_S per colo, and
-// so is its zero-change daily-bars fallback. 200 entries at ~1.5 KB a quote
+// list; now each symbol is fetched at most once per quote life per colo, and so
+// is its zero-change daily-bars fallback. 200 entries at ~1.5 KB a quote
 // (the sparklines) keeps the parse and re-serialize well inside the CPU budget.
 const MARKETS_MAP = 'mkt:quotes';
 const MARKETS_MAP_MAX = 200;
@@ -423,7 +426,7 @@ async function fetchMarkets(origin, symbols) {
   const quotes = await sharedMapGet(origin, MARKETS_MAP, symbols, async (missing) => {
     const settled = await Promise.allSettled(missing.map(fetchQuote));
     return new Map(missing.flatMap((symbol, i) => (settled[i].status === 'fulfilled' ? [[symbol, settled[i].value]] : [])));
-  }, { freshS: MARKETS_TTL_S, maxEntries: MARKETS_MAP_MAX });
+  }, { freshS: quoteFreshS, maxEntries: MARKETS_MAP_MAX });
   const held = symbols.filter((s) => quotes.has(s)).map((s) => quotes.get(s));
   if (!held.length) throw new Error('yahoo: all symbols failed');
   const indices = held.map((q) => q.value);
@@ -431,21 +434,21 @@ async function fetchMarkets(origin, symbols) {
   // stale backup (a later total outage should serve the full list, not this).
   const partial = indices.length < symbols.length;
   // "as of" is the OLDEST quote's fetch time, not this assembly's: a watchlist
-  // built partly from the shared map can carry a quote fetched up to
-  // MARKETS_TTL_S ago, and the card prints this stamp as its clock. The same
-  // instant, unrounded, bounds how long cached() keeps the list fresh.
-  const oldestMs = Math.min(...held.map((q) => q.fetchedAt));
-  const updatedAt = Math.floor(oldestMs / 1000);
-  return { updatedAt, indices, ...(partial && { partial: true }), [OLDEST_FETCHED_MS]: oldestMs };
+  // built partly from the shared map can carry a quote fetched a whole quote
+  // life ago, and the card prints this stamp as its clock. How long cached()
+  // keeps the list fresh is a separate instant, its first quote's expiry.
+  const updatedAt = Math.floor(Math.min(...held.map((q) => q.fetchedAt)) / 1000);
+  return { updatedAt, indices, ...(partial && { partial: true }), [FRESH_UNTIL_MS]: earliestFreshUntil(held) };
 }
 
 // /services/status TTL: 480s ≈ 1.5x the card's 5-minute poll (a TTL at or under
 // the poll expires just before every request, so a lone board never hit the
-// cache). Like MARKETS_TTL_S it is one ROW's whole fresh life, counted from its
-// upstream fetch: the shared row map reuses a provider's row for that long, and
-// a per-set entry built from it stays fresh only for what is left (svcFreshS).
+// cache). It is one ROW's whole fresh life, counted from its upstream fetch:
+// the shared row map reuses a provider's row for that long, and a per-set entry
+// built from it stays fresh only until its first row expires (svcFreshS), which
+// with one life for every row is the oldest row.
 const SVC_TTL_S = 480;
-const svcFreshS = freshForOldest(SVC_TTL_S);
+const svcFreshS = freshForEarliest(SVC_TTL_S);
 
 // Fleet-wide per-provider layer under the per-set cached() entry (see
 // sharedmap.js). The route caches per sorted id set, so a board following
@@ -506,8 +509,9 @@ async function fetchServices(origin, ids, env) {
   // serviceDigest throws when every row is unknown, so past it at least one row
   // was held, and the oldest of them is the digest's "as of".
   const digest = serviceDigest(ids, (id) => held.get(id)?.value ?? unknown.get(id));
-  const oldestMs = Math.min(...[...held.values()].map((e) => e.fetchedAt));
-  return { updatedAt: Math.floor(oldestMs / 1000), ...digest, [OLDEST_FETCHED_MS]: oldestMs };
+  const rows = [...held.values()];
+  const oldestMs = Math.min(...rows.map((e) => e.fetchedAt));
+  return { updatedAt: Math.floor(oldestMs / 1000), ...digest, [FRESH_UNTIL_MS]: earliestFreshUntil(rows) };
 }
 
 // In-process dispatcher for the health monitor. A Worker fetching its OWN
@@ -657,8 +661,8 @@ const handlers = {
       // key is sorted so AAPL,MSFT and MSFT,AAPL coalesce to one entry.
       const symbols = [...new Set(requested.length ? requested : DEFAULT_SYMBOLS)];
       const cacheKey = [...symbols].sort().join(',');
-      // The entry's fresh lifetime is its oldest quote's remaining one, not a
-      // full MARKETS_TTL_S from assembly (see MARKETS_TTL_S).
+      // The entry stays fresh until its first quote expires, never a full
+      // quote life from assembly (see marketsFreshS).
       return cached(url.origin, `markets:${cacheKey}`, marketsFreshS, () => fetchMarkets(url.origin, symbols));
     }
 

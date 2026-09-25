@@ -13,8 +13,14 @@
 //
 // Contract:
 //   sharedMapGet(origin, name, ids, fetchMissing, { freshS, retainS, maxEntries })
-//     -> Promise<Map<id, { value, fetchedAt }>>
-//   - Reads the map once. Every id with an entry younger than freshS is a hit.
+//     -> Promise<Map<id, { value, fetchedAt, freshUntil }>>
+//   - freshS is each value's fresh life in seconds, counted from its fetch:
+//     a number for every value alike, or (value, fetchedAtMs) => seconds when
+//     the right life depends on what the value says (a quote from a closed
+//     market can live longer than one still trading). The function is asked
+//     afresh on every read and must depend only on its arguments, so a value's
+//     life is fixed the moment it is fetched; a non-number answer counts as 0.
+//   - Reads the map once. Every id still inside its fresh life is a hit.
 //   - Calls fetchMissing(missingIds) ONLY when some id missed, never with an
 //     empty list. It resolves to a Map (or plain object) of id -> value for the
 //     ids it could fetch; an id it leaves out is a failure: not stored, not
@@ -23,9 +29,10 @@
 //     own stale fallback.
 //   - Writes the map back once, only if something was fetched, after pruning
 //     entries older than retainS and keeping at most maxEntries (newest first).
-//   - Returns hits plus fresh fetches, keyed by id. An expired entry whose
-//     refetch failed is NOT returned: this layer never serves stale data, the
-//     caller's own cache decides that.
+//   - Returns hits plus fresh fetches, keyed by id, each with freshUntil (epoch
+//     ms), the end of its fresh life. An expired entry whose refetch failed is
+//     NOT returned: this layer never serves stale data, the caller's own cache
+//     decides that.
 //   - Costs: exactly 1 Cache API match, plus 1 put when fetchMissing ran and
 //     returned anything. Budget the fetches inside fetchMissing yourself.
 //
@@ -41,20 +48,27 @@
 // A digest assembled from these values and cached whole (cached() in index.js)
 // can be born part-aged: a value reused at t=449 of a 450s life must not be
 // served fresh until t=899 because the digest restarted the clock. A caller
-// stamps the oldest value's fetchedAt on its digest under OLDEST_FETCHED_MS and
-// hands cached() freshForOldest(ttlS) as its ttlS, so the digest lives only for
-// what is left of that oldest part. A symbol key, because JSON.stringify skips
+// stamps the EARLIEST freshUntil among the values it used on its digest under
+// FRESH_UNTIL_MS and hands cached() freshForEarliest(fallbackS) as its ttlS, so
+// the digest lives only until its first part expires. With one freshS for every
+// value that part is simply the oldest; with per-value lives it need not be (a
+// quote fetched a minute ago while trading expires before one fetched ten
+// minutes ago from a closed market). A symbol key, because JSON.stringify skips
 // it: the served body is unchanged, while stamped()'s spread (and a mend's)
-// copies it through to the ttl function. updatedAt is the same instant floored
-// to whole seconds, too coarse to use here: a digest fetched entirely in this
-// request would read as up to a second old and cache for ttlS-1 or ttlS at
-// random. It is the fallback should the symbol ever be lost on the way.
-export const OLDEST_FETCHED_MS = Symbol('oldest part fetchedAt (ms)');
+// copies it through to the ttl function.
+//
+// Should the symbol ever be lost on the way, the fallback is updatedAt (the
+// oldest part's fetch, as both callers date their digests) plus fallbackS:
+// pass the SHORTEST life a value can have, so the guess never outlives a part.
+export const FRESH_UNTIL_MS = Symbol('earliest part freshUntil (ms)');
 
-export const freshForOldest = (ttlS) => (digest) => {
-  const oldestMs = digest[OLDEST_FETCHED_MS] ?? digest.updatedAt * 1000;
-  return Math.min(ttlS, (oldestMs + ttlS * 1000 - Date.now()) / 1000);
+export const freshForEarliest = (fallbackS) => (digest) => {
+  const untilMs = digest[FRESH_UNTIL_MS] ?? (digest.updatedAt + fallbackS) * 1000;
+  return (untilMs - Date.now()) / 1000;
 };
+
+// The stamp for a digest built from these entries: the first to expire.
+export const earliestFreshUntil = (entries) => Math.min(...entries.map((e) => e.freshUntil));
 
 const DAY_S = 24 * 3600;
 
@@ -84,11 +98,18 @@ export async function sharedMapGet(origin, name, ids, fetchMissing, {
   const key = mapKey(origin, name);
   const entries = await readEntries(cache, key);
   const t = now();
+  // End of a value's fresh life (epoch ms). Never before its fetch.
+  const lifeOf = typeof freshS === 'function' ? freshS : () => freshS;
+  const until = (value, fetchedAt) => {
+    const s = lifeOf(value, fetchedAt);
+    return fetchedAt + (Number.isFinite(s) ? Math.max(0, s) : 0) * 1000;
+  };
   const out = new Map();
   const missing = [];
   for (const id of new Set(ids)) {
     const e = entries.get(id);
-    if (e && t - e.fetchedAt < freshS * 1000) out.set(id, e);
+    const freshUntil = e && until(e.value, e.fetchedAt);
+    if (e && t < freshUntil) out.set(id, { ...e, freshUntil });
     else missing.push(id);
   }
   if (!missing.length) return out;
@@ -100,7 +121,7 @@ export async function sharedMapGet(origin, name, ids, fetchMissing, {
     if (!fetched.has(id)) continue;
     const e = { value: fetched.get(id), fetchedAt: t };
     entries.set(id, e);
-    out.set(id, e);
+    out.set(id, { ...e, freshUntil: until(e.value, t) });
     wrote = true;
   }
   if (!wrote) return out;

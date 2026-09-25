@@ -20,6 +20,8 @@ import { njtDateToEpoch } from '../../worker/src/njt.js';
 import { mapMtaAlerts } from '../../worker/src/alerts.js';
 import { resetGraphToken, fetchServiceRows, serviceDigest, SVC_DEADLINE_MS, SERVICES } from '../../worker/src/svcstatus.js';
 import STATISTA from './fixtures/statista-cotd.html?raw';
+import yahooFx from '../fixtures/yahoo-gspc.json';
+import { mapYahooChart, quoteFreshS, nextOpenS, QUOTE_ACTIVE_S, QUOTE_IDLE_MAX_S, QUOTE_UNKNOWN_OPEN_S } from '../../worker/src/markets.js';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} };
@@ -1543,8 +1545,8 @@ describe('/markets', () => {
     const t = Date.now();
     const kept = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
     await seedQuotes({
-      AAA: { value: kept, fetchedAt: t - 200_000 }, // inside 450s: reused
-      BBB: { value: { symbol: 'BBB' }, fetchedAt: t - 451_000 }, // past it: refetched
+      AAA: { value: kept, fetchedAt: t - 200_000 }, // inside a trading quote's 240s: reused
+      BBB: { value: { symbol: 'BBB' }, fetchedAt: t - 241_000 }, // past it: refetched
     });
     const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const res = await (await call('/markets?symbols=aaa,bbb')).json();
@@ -1559,21 +1561,23 @@ describe('/markets', () => {
 
   it('keeps a watchlist fresh only as long as its oldest reused quote, never a full TTL from assembly', async () => {
     // AAA fetched at t=0; the uncached list AAA,BBB assembled around it at
-    // t=449. The entry used to restart the clock there, so a board polling at
-    // t=898 still got the t=0 quote marked fresh. Now it has AAA's last second.
+    // t=239. The entry used to restart the clock there, so a board polling at
+    // t=478 still got the t=0 quote marked fresh. Now it has AAA's last second.
+    // (Neither quote says when its market traded, so both are judged trading:
+    // QUOTE_ACTIVE_S each.)
     const key = 'markets:AAA,BBB';
     await clearCache(key);
-    const t0 = Date.now() - 449_000;
+    const t0 = Date.now() - 239_000;
     const old = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
     await seedQuotes({ AAA: { value: old, fetchedAt: t0 } });
     stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const first = await call('/markets?symbols=aaa,bbb');
     expect((await first.json()).indices[0]).toEqual(old); // reused, as it should be
-    expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 450s
+    expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 240s
     const entry = await caches.default.match(cacheKey('fresh', key));
-    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 450_000 + 500); // rounding slop
+    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 240_000 + 500); // rounding slop
 
-    // Past t=450 the entry has lapsed with AAA, so AAA comes from Yahoo again
+    // Past t=240 the entry has lapsed with AAA, so AAA comes from Yahoo again
     // instead of the t=0 quote being served as fresh.
     await new Promise((r) => setTimeout(r, 1100));
     const calls = stubFetch([{ match: /chart\/AAA/, body: ySym('AAA', 222, 200) }]);
@@ -1582,10 +1586,10 @@ describe('/markets', () => {
     expect(calls).toHaveLength(1); // AAA only; BBB is still fresh in the map
     expect(body.stale).toBe(false);
     expect(body.indices[0]).toMatchObject({ symbol: 'AAA', price: 222 });
-    // Now BBB, a second or so old, is the oldest quote and bounds the list.
+    // Now BBB, a second or so old, is the first quote to expire and bounds the list.
     const maxAge = Number(/max-age=(\d+)/.exec(later.headers.get('cache-control'))[1]);
-    expect(maxAge).toBeLessThan(450);
-    expect(maxAge).toBeGreaterThan(440);
+    expect(maxAge).toBeLessThan(240);
+    expect(maxAge).toBeGreaterThan(230);
     await clearCache(key);
   });
 
@@ -1626,6 +1630,154 @@ describe('/markets', () => {
     expect(spent).toBe(45);
     expect(spent).toBeLessThan(50);
     await clearCache(key);
+  });
+
+  // A quote whose market is closed, fetched `agoS` ago: the next session opens
+  // three hours from now, so its life is the 1800s cap (see quoteFreshS).
+  const closedQuote = (sym, agoS = 0) => {
+    const nowS = Math.floor(Date.now() / 1000);
+    return {
+      symbol: sym, name: sym, price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0,
+      tradedAt: nowS - agoS - 3 * 3600,
+      session: { start: nowS + 3 * 3600, end: nowS + 3 * 3600 + 23_400, gmtoffset: -14400 },
+    };
+  };
+
+  it('caches a closed market\'s quote until near its next open, capped at 30 minutes', async () => {
+    await clearCache('markets:AAPL');
+    const nowS = Math.floor(Date.now() / 1000);
+    const y = ySym('AAPL');
+    Object.assign(y.chart.result[0].meta, {
+      regularMarketTime: nowS - 3 * 3600,
+      currentTradingPeriod: { regular: { start: nowS + 5 * 3600, end: nowS + 5 * 3600 + 23_400, gmtoffset: -14400 } },
+    });
+    stubFetch([{ match: /chart\/AAPL/, body: y }]);
+    const res = await call('/markets?symbols=aapl');
+    expect(res.headers.get('cache-control')).toBe(`public, max-age=${QUOTE_IDLE_MAX_S}`);
+    // The quote carries what that was judged from; the card ignores both.
+    expect((await res.json()).indices[0]).toMatchObject({ tradedAt: nowS - 3 * 3600, session: { start: nowS + 5 * 3600 } });
+    await clearCache('markets:AAPL');
+  });
+
+  it('keeps a mixed watchlist only until its FIRST quote expires, not its oldest plus a constant', async () => {
+    // AAA: a closed market's quote, fetched 10 min ago, 20 min of life left.
+    // BBB: fetched now from a market that is trading, 4 min of life. The list
+    // must not hold BBB for AAA's remaining 20 minutes.
+    const key = 'markets:AAA,BBB';
+    await clearCache(key);
+    const t0 = Date.now() - 600_000;
+    await seedQuotes({ AAA: { value: closedQuote('AAA', 600), fetchedAt: t0 } });
+    const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
+    const res = await call('/markets?symbols=aaa,bbb');
+    const body = await res.json();
+    expect(calls).toHaveLength(1); // AAA reused from the map
+    const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get('cache-control'))[1]);
+    expect(maxAge).toBeLessThanOrEqual(QUOTE_ACTIVE_S);
+    expect(maxAge).toBeGreaterThan(QUOTE_ACTIVE_S - 10);
+    expect(body.updatedAt).toBe(Math.floor(t0 / 1000)); // "as of" is still the oldest quote
+    await clearCache(key);
+
+    // Alone, the closed quote's list lives out AAA's own remaining life.
+    await clearCache('markets:AAA');
+    const alone = await call('/markets?symbols=aaa');
+    const aloneAge = Number(/max-age=(\d+)/.exec(alone.headers.get('cache-control'))[1]);
+    expect(aloneAge).toBeLessThanOrEqual(1200);
+    expect(aloneAge).toBeGreaterThan(1190);
+    await clearCache('markets:AAA');
+  });
+});
+
+// quoteFreshS (markets.js): a quote lives 240s while its market trades and
+// until just before the next open (capped at 30 min) while it is closed. The
+// session shapes are Yahoo's own: currentTradingPeriod.regular as recorded in
+// test/fixtures/yahoo-gspc.json and read live on 2026-09-25 (a Friday).
+describe('quote freshness by trading activity', () => {
+  const at = (iso) => Date.parse(iso) / 1000;
+  const life = (q, iso) => quoteFreshS(q, Date.parse(iso));
+  const NY = -14400;
+  const NY_FRI = { start: at('2026-09-25T13:30:00Z'), end: at('2026-09-25T20:00:00Z'), gmtoffset: NY };
+  const NY_MON = { start: at('2026-09-28T13:30:00Z'), end: at('2026-09-28T20:00:00Z'), gmtoffset: NY };
+  const MON_OPEN = NY_MON.start;
+  const FRI_CLOSE_PRINT = at('2026-09-25T20:00:05Z');
+  const quote = (session, tradedAt) => ({ symbol: '^GSPC', price: 1, session, tradedAt });
+
+  it('carries regularMarketTime and the regular session from the recorded fixture', () => {
+    const meta = yahooFx.chart.result[0].meta;
+    const q = mapYahooChart(yahooFx, 'S&P 500');
+    expect(q.tradedAt).toBe(meta.regularMarketTime);
+    expect(q.session).toEqual({
+      start: meta.currentTradingPeriod.regular.start,
+      end: meta.currentTradingPeriod.regular.end,
+      gmtoffset: -14400,
+    });
+    // Recorded on a Wednesday evening, with Yahoo already naming Thursday's
+    // session: five minutes after the last print it still counts as trading,
+    // an hour after it the quote may live the full half hour.
+    expect(quoteFreshS(q, (meta.regularMarketTime + 300) * 1000)).toBe(QUOTE_ACTIVE_S);
+    expect(quoteFreshS(q, (meta.regularMarketTime + 3600) * 1000)).toBe(QUOTE_IDLE_MAX_S);
+    // A payload without them (an older quote in the map) is judged trading.
+    expect(mapYahooChart({ chart: { result: [{ meta: { symbol: 'X', regularMarketPrice: 1, chartPreviousClose: 1 } }] } }))
+      .toMatchObject({ tradedAt: null, session: null });
+  });
+
+  it('a trading quote lives 240s, including a 24-hour market and the closing auction', () => {
+    expect(QUOTE_ACTIVE_S).toBe(240);
+    expect(life(quote(NY_FRI, at('2026-09-25T15:00:00Z')), '2026-09-25T15:00:30Z')).toBe(240);
+    const btc = { start: at('2026-09-25T00:00:00Z'), end: at('2026-09-25T23:59:00Z'), gmtoffset: 0 };
+    expect(life(quote(btc, at('2026-09-25T13:53:19Z')), '2026-09-25T13:53:30Z')).toBe(240);
+    // Past the bell, but the last print is minutes old: still settling.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:05:00Z')).toBe(240);
+  });
+
+  it('Friday\'s close is never served as closed past Monday\'s open, whichever session Yahoo names', () => {
+    expect(QUOTE_IDLE_MAX_S).toBe(1800);
+    // Friday evening: the full half hour, not a weekend.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:30:00Z')).toBe(1800);
+    for (const session of [NY_FRI, NY_MON]) { // Yahoo not yet rolled over, and rolled
+      for (let t = at('2026-09-25T20:16:00Z'); t < MON_OPEN; t += 7 * 60) {
+        const l = quoteFreshS(quote(session, FRI_CLOSE_PRINT), t * 1000);
+        expect(l).toBeGreaterThanOrEqual(QUOTE_ACTIVE_S);
+        expect(l).toBeLessThanOrEqual(QUOTE_IDLE_MAX_S);
+        // Gone by the open, or held no longer than a trading quote would be.
+        if (l > QUOTE_ACTIVE_S) expect(t + l).toBeLessThanOrEqual(MON_OPEN);
+        expect(t + l).toBeLessThanOrEqual(MON_OPEN + QUOTE_ACTIVE_S);
+      }
+    }
+    // Once Monday's session is under way the Friday print is trading data again.
+    expect(life(quote(NY_MON, FRI_CLOSE_PRINT), '2026-09-28T13:31:00Z')).toBe(240);
+  });
+
+  it('projects across a daylight-saving change without landing after the real open', () => {
+    // Friday 2027-03-12 New York opens 14:30Z (EST); Monday 2027-03-15, after
+    // spring-forward, 13:30Z. A Friday session projected by whole days says
+    // 14:30Z Monday: an hour late, which the projection margin absorbs.
+    const fri = { start: at('2027-03-12T14:30:00Z'), end: at('2027-03-12T21:00:00Z'), gmtoffset: -18000 };
+    const realOpen = at('2027-03-15T13:30:00Z');
+    // Each fetch is more than a trading quote's life before the real open, so
+    // each must be gone by it.
+    for (const iso of ['2027-03-15T11:00:00Z', '2027-03-15T12:45:00Z', '2027-03-15T13:05:00Z']) {
+      const l = life(quote(fri, at('2027-03-12T21:00:05Z')), iso);
+      expect(l).toBeGreaterThanOrEqual(QUOTE_ACTIVE_S);
+      expect(at(iso) + l).toBeLessThanOrEqual(realOpen);
+    }
+    // Friday evening, the same projection still earns the full half hour.
+    expect(life(quote(fri, at('2027-03-12T21:00:05Z')), '2027-03-12T22:00:00Z')).toBe(QUOTE_IDLE_MAX_S);
+  });
+
+  it('projects the next open when Yahoo still names the finished session (Tokyo, live 2026-09-25)', () => {
+    // 13:52Z Friday, seven hours after Tokyo closed, the session read Friday's.
+    const tokyo = { start: at('2026-09-25T00:00:00Z'), end: at('2026-09-25T06:30:00Z'), gmtoffset: 32400 };
+    expect(nextOpenS(tokyo, at('2026-09-25T13:52:00Z'))).toBe(at('2026-09-28T00:00:00Z') - 3600); // Monday, less the margin
+    expect(life(quote(tokyo, at('2026-09-25T06:45:03Z')), '2026-09-25T13:52:00Z')).toBe(1800);
+    // A session Yahoo already names as next is taken as stated, less a minute.
+    expect(nextOpenS(NY_MON, at('2026-09-26T12:00:00Z'))).toBe(MON_OPEN - 60);
+  });
+
+  it('a quote that cannot say enough is judged trading, and an unforeseeable open gets 900s', () => {
+    expect(life({ symbol: 'OLD' }, '2026-09-26T12:00:00Z')).toBe(QUOTE_ACTIVE_S); // from before these fields
+    expect(life(quote(null, null), '2026-09-26T12:00:00Z')).toBe(QUOTE_ACTIVE_S);
+    expect(life(quote(null, at('2026-09-25T20:00:05Z')), '2026-09-26T12:00:00Z')).toBe(QUOTE_UNKNOWN_OPEN_S);
+    expect(QUOTE_UNKNOWN_OPEN_S).toBe(900);
   });
 });
 
@@ -3204,7 +3356,9 @@ describe('route TTLs sit above the card poll interval', () => {
     ['/amtrak/departures', 'amtrak', any({}), {}, 90], // amtrak.js 60s
     ['/ferry/departures', 'ferry', any(FERRY, { raw: true }), {}, 90], // ferry.js 60s
     ['/path/realtime', 'path', any({}), {}, 90], // path.js 60s
-    ['/markets?symbols=aapl', 'markets:AAPL', any(YAHOO), {}, 450], // markets.js 5 min
+    // markets.js 5 min. A quote that cannot say its market is closed is judged
+    // trading: 240s, UNDER the poll on purpose. See 'quote freshness by trading'.
+    ['/markets?symbols=aapl', 'markets:AAPL', any(YAHOO), {}, 240],
     ['/golf', 'golf', any({}), {}, 450], // golf.js 5 min
     ['/tennis', 'tennis', any({}), {}, 450], // tennis.js 5 min
     ['/tfl/status', 'tfl', any([]), {}, 180], // tfl.js 2 min
