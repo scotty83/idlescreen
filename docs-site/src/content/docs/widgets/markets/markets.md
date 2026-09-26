@@ -26,8 +26,11 @@ header time is the only sign.
 When every ticker you follow is closed, as over a weekend, the header says
 **Closed** instead of a time and the rows carry no label.
 
-The ticker wall behind the tap uses the same header; its tiles are not
-labelled.
+The ticker wall behind the tap uses the same header. When some tickers are
+closed and others are still trading, each closed tile shows **CLOSED** at the
+right end of its bottom line, after the company name (or, on an index tile,
+the index symbol). The tiles are labelled even when the card itself is at its
+shortest size. When every ticker is closed, the tiles carry no label.
 
 ## Configure
 
