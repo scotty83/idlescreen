@@ -50,7 +50,12 @@ export const CHECKS = [
     ok: (j) => typeof j.version === 'string' && j.version.length > 3,
   },
   {
-    name: 'markets', // Yahoo (unofficial) — the flakiest dependency
+    // Yahoo (unofficial), the flakiest dependency. updatedAt is the OLDEST
+    // quote's fetch, and a closed market's quote lives up to 30 min
+    // (QUOTE_IDLE_MAX_S), so a healthy night reads up to half an hour old: well
+    // inside STALE_MAX. An outage still pages once the last good quote passes
+    // an hour, as before.
+    name: 'markets',
     path: '/markets',
     maxStaleSec: STALE_MAX,
     ok: (j) => Array.isArray(j.indices) && j.indices.length > 0 && Number.isFinite(j.indices[0].price),

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { sharedMapGet } from '../../worker/src/sharedmap.js';
+import { sharedMapGet, freshForEarliest, earliestFreshUntil, FRESH_UNTIL_MS } from '../../worker/src/sharedmap.js';
 
 // The contract a later caller (per-provider service status, Citi Bike) builds
 // on, pinned against the real Cache API: one read, a write only when something
@@ -88,5 +88,75 @@ describe('sharedMapGet', () => {
     const got = await sharedMapGet(ORIGIN, NAME, ['a'], async () => ({ a: 1 }), { freshS: 300, now });
     expect(values(got)).toEqual({ a: 1 });
     expect(await stored()).toEqual({ a: { value: 1, fetchedAt: T } });
+  });
+
+  it('hands back each value\'s freshUntil: fetch time plus a numeric freshS', async () => {
+    await seed({ a: { value: 1, fetchedAt: T - 60_000 } });
+    const got = await sharedMapGet(ORIGIN, NAME, ['a', 'b'], async () => ({ b: 2 }), { freshS: 300, now });
+    expect(got.get('a').freshUntil).toBe(T - 60_000 + 300_000);
+    expect(got.get('b').freshUntil).toBe(T + 300_000);
+    expect(await stored()).toEqual({ // freshUntil is derived on read, never stored
+      a: { value: 1, fetchedAt: T - 60_000 },
+      b: { value: 2, fetchedAt: T },
+    });
+  });
+
+  // A quote from a closed market can live far longer than one still trading, so
+  // freshS may be a function of the value, judged from its own fetch time.
+  describe('per-value freshS', () => {
+    const lifeOf = vi.fn((v) => v.life);
+    const freshS = (value, fetchedAt) => lifeOf(value, fetchedAt);
+
+    it('gives each value its own life, counted from its own fetch', async () => {
+      lifeOf.mockClear();
+      await seed({
+        long: { value: { life: 1800 }, fetchedAt: T - 600_000 }, // 10 min into 30: a hit
+        short: { value: { life: 240 }, fetchedAt: T - 300_000 }, // 5 min into 4: expired
+      });
+      const fetchMissing = vi.fn(async (ids) => new Map(ids.map((id) => [id, { life: 240 }])));
+      const got = await sharedMapGet(ORIGIN, NAME, ['long', 'short'], fetchMissing, { freshS, now });
+      expect(fetchMissing).toHaveBeenCalledWith(['short']);
+      expect(got.get('long').freshUntil).toBe(T - 600_000 + 1800_000);
+      expect(got.get('short').freshUntil).toBe(T + 240_000); // refetched now
+      // Asked with the value and the instant it was fetched, not the read time.
+      expect(lifeOf).toHaveBeenCalledWith({ life: 1800 }, T - 600_000);
+      expect(lifeOf).toHaveBeenCalledWith({ life: 240 }, T);
+    });
+
+    it('treats a non-number life as already expired: refetched every time, never kept', async () => {
+      await seed({ a: { value: { life: undefined }, fetchedAt: T - 1 } });
+      const fetchMissing = vi.fn(async () => ({ a: { life: NaN } }));
+      const got = await sharedMapGet(ORIGIN, NAME, ['a'], fetchMissing, { freshS, now });
+      expect(fetchMissing).toHaveBeenCalledWith(['a']);
+      expect(got.get('a').freshUntil).toBe(T);
+    });
+  });
+});
+
+// The cap on a digest built from map values and cached whole: it lives until
+// its FIRST part expires, which with per-value lives need not be its oldest.
+describe('freshForEarliest', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('lives until the earliest part expires, not the oldest part plus a constant', () => {
+    vi.useFakeTimers({ now: T });
+    const parts = [
+      { fetchedAt: T - 600_000, freshUntil: T - 600_000 + 1800_000 }, // oldest, closed market: 20 min left
+      { fetchedAt: T - 60_000, freshUntil: T - 60_000 + 240_000 }, // newer, trading: 3 min left
+    ];
+    const digest = { updatedAt: Math.floor((T - 600_000) / 1000), [FRESH_UNTIL_MS]: earliestFreshUntil(parts) };
+    expect(freshForEarliest(240)(digest)).toBe(180);
+  });
+
+  it('with one life for every part, is exactly the oldest part\'s remainder (the /services rule)', () => {
+    vi.useFakeTimers({ now: T });
+    const parts = [T - 479_000, T - 10_000].map((fetchedAt) => ({ fetchedAt, freshUntil: fetchedAt + 480_000 }));
+    const digest = { updatedAt: Math.floor((T - 479_000) / 1000), [FRESH_UNTIL_MS]: earliestFreshUntil(parts) };
+    expect(freshForEarliest(480)(digest)).toBe(1);
+  });
+
+  it('falls back to updatedAt plus the shortest life should the stamp be lost', () => {
+    vi.useFakeTimers({ now: T });
+    expect(freshForEarliest(240)({ updatedAt: T / 1000 - 100 })).toBe(140);
   });
 });

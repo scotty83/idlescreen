@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { CHECKS, runHealthChecks, notify, alertPlan, nextFailingState, heartbeat } from '../../worker/src/health.js';
+import { QUOTE_IDLE_MAX_S } from '../../worker/src/markets.js';
+import { SPORTS_IDLE_MAX_S } from '../../worker/src/sports.js';
 
 // Valid response bodies keyed by a unique substring of each check's URL, so a
 // mock fetch can answer every probe with a shape its validator accepts. The
@@ -343,6 +345,19 @@ describe('stale-age (cached routes serving old data)', () => {
     const markets = byName(report, 'markets');
     expect(markets.ok).toBe(true);
     expect(markets.detail).toMatch(/ok \(stale \d+ min\)/);
+  });
+
+  it('never pages on a closed market or an idle team row: their longest fresh lives sit inside the threshold', async () => {
+    // /markets dates its digest by its oldest quote, and a closed market's quote
+    // now lives up to QUOTE_IDLE_MAX_S; a My Teams row with nothing to play up to
+    // SPORTS_IDLE_MAX_S. Both are the normal state every night and weekend, so
+    // a fresh answer at that age must read green, with room to spare for the
+    // board-side and cron-side lag. Read from CHECKS, not restated here.
+    const maxStale = (name) => CHECKS.find((c) => c.name === name).maxStaleSec;
+    expect(QUOTE_IDLE_MAX_S * 1.5).toBeLessThan(maxStale('markets'));
+    expect(SPORTS_IDLE_MAX_S * 1.5).toBeLessThan(maxStale('espn'));
+    const body = JSON.stringify({ indices: [{ price: 100 }], stale: false, updatedAt: nowSec() - QUOTE_IDLE_MAX_S - 5 });
+    expect(byName(await run({ '/markets': { body } }), 'markets')).toMatchObject({ ok: true, detail: 'ok' });
   });
 
   it('FAILS an own route whose payload carries no updatedAt', async () => {

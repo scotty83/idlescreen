@@ -1,7 +1,10 @@
 import { fetchGolf, fetchTennis } from '../../worker/src/scores.js';
 import { runHealthChecks } from '../../worker/src/health.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { digestNext, digestSchedule, digestScoreboard, fetchTeamSummary, mapTeamSummary } from '../../worker/src/sports.js';
+import {
+  digestNext, digestSchedule, digestScoreboard, fetchTeamSummary, mapTeamSummary, nextStartAt, teamFreshS,
+  SPORTS_LIVE_S, SPORTS_IDLE_MAX_S, SPORTS_UNSURE_S,
+} from '../../worker/src/sports.js';
 import { ESPN_UA } from '../../worker/src/espn.js';
 import { env } from 'cloudflare:test';
 import worker, { guardFetch } from '../../worker/src/index.js';
@@ -17,6 +20,8 @@ import { njtDateToEpoch } from '../../worker/src/njt.js';
 import { mapMtaAlerts } from '../../worker/src/alerts.js';
 import { resetGraphToken, fetchServiceRows, serviceDigest, SVC_DEADLINE_MS, SERVICES } from '../../worker/src/svcstatus.js';
 import STATISTA from './fixtures/statista-cotd.html?raw';
+import yahooFx from '../fixtures/yahoo-gspc.json';
+import { mapYahooChart, quoteFreshS, nextOpenS, QUOTE_ACTIVE_S, QUOTE_IDLE_MAX_S, QUOTE_UNKNOWN_OPEN_S } from '../../worker/src/markets.js';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} };
@@ -863,10 +868,10 @@ describe('mapTeamSummary nextLine passthrough', () => {
 const sportsKey = (path) => new Request(`https://api.test/__cache/${path}`);
 const resetTeams = (...ids) => Promise.all([
   caches.default.delete(sportsKey('sb/mlb')),
-  ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched2/mlb:${id}`))]),
+  ...ids.flatMap((id) => [clearCache(`sports:mlb:${id}`), caches.default.delete(sportsKey(`sched3/mlb:${id}`))]),
 ]);
 const seedSched = (id) => caches.default.put(
-  sportsKey(`sched2/mlb:${id}`),
+  sportsKey(`sched3/mlb:${id}`),
   new Response(JSON.stringify({ lastLine: null, nextLine: null }), { headers: { 'Cache-Control': 'max-age=600' } }),
 );
 
@@ -1083,7 +1088,7 @@ describe('/sports/team schedule-lines TTL', () => {
       put.mockRestore();
       await resetTeams('10');
     }
-    const [, stored] = calls.find(([req]) => req.url.endsWith('/__cache/sched2/mlb:10'));
+    const [, stored] = calls.find(([req]) => req.url.endsWith('/__cache/sched3/mlb:10'));
     return stored.headers.get('cache-control');
   };
 
@@ -1095,6 +1100,219 @@ describe('/sports/team schedule-lines TTL', () => {
 
   it('keeps a real result for half an hour, even one with no games in it', async () => {
     expect(await schedLinesTtl([{ match: /teams\/10\/schedule$/, body: { events: [] } }])).toBe('max-age=1800');
+  });
+});
+
+// The /sports/team TTL follows the game (teamFreshS in sports.js): a minute
+// while anything can change, up to 15 minutes while nothing can. The long TTL
+// is the one that can hide a first pitch, so most of these pin when it must
+// NOT be given. Dates are ESPN's own shape ("2026-09-24T23:05Z", checked live).
+describe('/sports/team TTL by game state', () => {
+  const NOW = Date.parse('2026-09-25T18:00:00Z');
+  const S = NOW / 1000;
+  const MIN = 60;
+  const ttl = (row) => teamFreshS({ row }, NOW);
+
+  it('a live game lives a minute', () => {
+    expect(ttl({ state: 'in', startsAt: S - 3600, nextStartsAt: S + 86400 })).toBe(SPORTS_LIVE_S);
+    expect(SPORTS_LIVE_S).toBe(60);
+  });
+
+  it('a pre-game row expires at least 10 minutes before first pitch, however early it was cached', () => {
+    // Cached 15 min out: inside the 20-minute window, so it is already live.
+    expect(ttl({ state: 'pre', startsAt: S + 15 * MIN })).toBe(60);
+    for (const out of [15, 21, 25, 30, 45, 120, 600]) {
+      const t = ttl({ state: 'pre', startsAt: S + out * MIN });
+      expect(t).toBeGreaterThanOrEqual(60);
+      expect(t).toBeLessThanOrEqual(900);
+      expect(S + t).toBeLessThanOrEqual(S + (out - 10) * MIN); // gone by start - 10 min
+    }
+    expect(ttl({ state: 'pre', startsAt: S + 25 * MIN })).toBe(15 * MIN); // start - 10 min exactly
+    expect(ttl({ state: 'pre', startsAt: S + 21 * MIN })).toBe(11 * MIN);
+    expect(ttl({ state: 'pre', startsAt: S + 3 * 3600 })).toBe(SPORTS_IDLE_MAX_S);
+    expect(SPORTS_IDLE_MAX_S).toBe(900);
+  });
+
+  it('a game past its start but still pre (a rain delay, a late start) stays live for six hours', () => {
+    expect(ttl({ state: 'pre', startsAt: S - 30 * MIN })).toBe(60);
+    expect(ttl({ state: 'pre', startsAt: S - (6 * 60 - 1) * MIN })).toBe(60);
+  });
+
+  it('a postponed game (pre, dated six hours or more ago) waits on the NEXT game, not its own date', () => {
+    const postponed = { state: 'pre', startsAt: S - 7 * 3600 };
+    expect(ttl({ ...postponed, nextStartsAt: S + 86400 })).toBe(900);
+    expect(ttl({ ...postponed, nextStartsAt: S + 21 * MIN })).toBe(11 * MIN);
+    // The next game inside its 20-minute window, or under way: live, as a pre row.
+    expect(ttl({ ...postponed, nextStartsAt: S + 20 * MIN })).toBe(60);
+    expect(ttl({ ...postponed, nextStartsAt: S + 15 * MIN })).toBe(60);
+    expect(ttl({ ...postponed, nextStartsAt: S - 30 * MIN })).toBe(60);
+    expect(ttl({ ...postponed, nextStartsAt: null })).toBe(900); // nothing else scheduled
+    expect(ttl(postponed)).toBe(SPORTS_UNSURE_S); // the schedule could not be read
+  });
+
+  it('a final with a doubleheader to come expires ten minutes before game two, and is live inside its 20-minute window', () => {
+    const final = { state: 'post', startsAt: S - 3 * 3600 };
+    expect(ttl({ ...final, nextStartsAt: S + 40 * MIN })).toBe(900);
+    expect(ttl({ ...final, nextStartsAt: S + 21 * MIN })).toBe(11 * MIN);
+    // Inside game two's 20-minute window the final is treated as a pre row
+    // would be: live, not left to idle until ten minutes out.
+    expect(ttl({ ...final, nextStartsAt: S + 20 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S + 15 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S + 5 * MIN })).toBe(60);
+    // Game one ran long past game two's nominal start: game two is due now.
+    expect(ttl({ ...final, nextStartsAt: S - 20 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S - (6 * 60 - 1) * MIN })).toBe(60);
+    // Same for a team with no game on its row yet.
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: S + 15 * MIN })).toBe(60);
+  });
+
+  it('an idle row with nothing scheduled lives the maximum; one whose schedule failed never does', () => {
+    expect(ttl({ state: 'post', startsAt: S - 86400, nextStartsAt: null })).toBe(900);
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: null })).toBe(900);
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: S + 2 * 86400 })).toBe(900);
+    expect(ttl({ state: 'post', startsAt: S - 86400 })).toBe(SPORTS_UNSURE_S);
+    expect(ttl({ state: 'none', startsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(SPORTS_UNSURE_S).toBeLessThan(SPORTS_IDLE_MAX_S);
+  });
+
+  it('an unknown state, a missing start or a missing row never gets the long TTL', () => {
+    expect(ttl({ state: 'delayed', startsAt: S + 86400, nextStartsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(ttl({ state: 'pre', startsAt: null, nextStartsAt: null })).toBe(SPORTS_UNSURE_S);
+    expect(teamFreshS({ row: null }, NOW)).toBe(SPORTS_UNSURE_S);
+    expect(teamFreshS(undefined, NOW)).toBe(SPORTS_UNSURE_S);
+  });
+
+  it('nextStartAt keeps a doubleheader game two past its nominal time, but not a postponed game', () => {
+    const ev = (date, state) => ({ date, competitions: [{ status: { type: { state } } }] });
+    const sched = { events: [
+      ev('2026-09-24T23:05Z', 'post'),
+      ev('2026-09-25T10:05Z', 'pre'), // 8h ago and still pre: postponed
+      ev('2026-09-25T17:05Z', 'pre'), // 55 min ago and still pre: game two, due
+      ev('2026-09-27T19:20Z', 'pre'),
+    ] };
+    expect(nextStartAt(sched, NOW)).toBe(Date.parse('2026-09-25T17:05Z') / 1000);
+    expect(nextStartAt({ events: [ev('2026-09-25T10:05Z', 'pre'), ev('2026-09-27T19:20Z', 'pre')] }, NOW))
+      .toBe(Date.parse('2026-09-27T19:20Z') / 1000);
+    expect(nextStartAt({ events: [ev('2026-09-24T23:05Z', 'post')] }, NOW)).toBeNull();
+    expect(nextStartAt({}, NOW)).toBeNull();
+  });
+
+  it('nextStartAt counts a game the schedule already calls live as starting now', () => {
+    const ev = (date, state) => ({ date, competitions: [{ status: { type: { state } } }] });
+    // A doubleheader's game two under way in the schedule, game one final:
+    // whatever game two's date says, the next start is now.
+    const sched = { events: [
+      ev('2026-09-25T13:05Z', 'post'),
+      ev('2026-09-25T17:05Z', 'in'),
+      ev('2026-09-26T17:05Z', 'pre'),
+    ] };
+    expect(nextStartAt(sched, NOW)).toBe(S);
+    // Dated long enough ago to read as postponed were it 'pre', or not dated
+    // at all: live all the same.
+    expect(nextStartAt({ events: [ev('2026-09-25T08:00Z', 'in')] }, NOW)).toBe(S);
+    expect(nextStartAt({ events: [ev(undefined, 'in')] }, NOW)).toBe(S);
+    // So the final on the row lives a minute, not until tomorrow's game.
+    expect(ttl({ state: 'post', startsAt: S - 5 * 3600, nextStartsAt: nextStartAt(sched, NOW) })).toBe(60);
+  });
+
+  describe('on the route', () => {
+    // ESPN dates carry minutes, not seconds.
+    const iso = (ms) => new Date(ms).toISOString().replace(/:\d\d\.\d{3}Z$/, 'Z');
+    const toMinute = (ms) => Math.floor(ms / 60_000) * 60;
+    const game = (state, startMs, detail) => ({ id: '77', date: iso(startMs), competitions: [{
+      date: iso(startMs),
+      status: { type: { state, shortDetail: detail } },
+      competitors: [
+        { homeAway: 'home', team: { abbreviation: 'NYY' }, score: state === 'pre' ? undefined : { value: 4 } },
+        { homeAway: 'away', team: { abbreviation: 'BOS' }, score: state === 'pre' ? undefined : { value: 2 } },
+      ],
+    }] });
+    const team = (ev) => ({ team: { id: '10', abbreviation: 'NYY', shortDisplayName: 'Yankees', logos: [], nextEvent: ev ? [ev] : [] } });
+    const maxAge = (res) => Number(/max-age=(\d+)/.exec(res.headers.get('cache-control'))[1]);
+    const summary = async (teamBody, schedRoute) => {
+      await resetTeams('10');
+      stubFetch([
+        { match: /teams\/10$/, body: teamBody },
+        { match: /teams\/10\/schedule$/, ...schedRoute },
+        { match: /mlb\/scoreboard$/, body: { events: [] } },
+      ]);
+      const res = await call('/sports/team?lg=mlb&id=10');
+      const { row } = await res.json();
+      await resetTeams('10');
+      return { res, row };
+    };
+
+    it('serves a live row for a minute and an idle one for fifteen, with its start times on the row', async () => {
+      const live = await summary(team(game('in', Date.now() - 3600_000, 'Top 5th')), { body: { events: [] } });
+      expect(live.res.headers.get('cache-control')).toBe('public, max-age=60');
+
+      const started = Date.now() - 4 * 3600_000;
+      const tomorrow = Date.now() + 86400_000;
+      const idle = await summary(team(game('post', started, 'Final')), { body: { events: [game('pre', tomorrow)] } });
+      expect(idle.res.headers.get('cache-control')).toBe('public, max-age=900');
+      // Additive fields the card ignores.
+      expect(idle.row.startsAt).toBe(toMinute(started));
+      expect(idle.row.nextStartsAt).toBe(toMinute(tomorrow));
+    });
+
+    it('serves a final for a minute while the schedule already has game two under way', async () => {
+      // The team endpoint still points at game one's final; the schedule has
+      // moved on to game two, live.
+      const gameOne = Date.now() - 4 * 3600_000;
+      const gameTwo = { ...game('in', Date.now() - 30 * 60_000, 'Top 2nd'), id: '78' };
+      const { res, row } = await summary(team(game('post', gameOne, 'Final')), {
+        body: { events: [game('post', gameOne, 'Final'), gameTwo, game('pre', Date.now() + 86400_000)] },
+      });
+      expect(row.state).toBe('post');
+      expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+    });
+
+    it('holds a final only until ten minutes before a doubleheader\'s game two', async () => {
+      const gameTwo = Date.now() + 25 * 60_000;
+      const { res } = await summary(team(game('post', Date.now() - 3 * 3600_000, 'Final')), { body: { events: [game('pre', gameTwo)] } });
+      // Minute precision moves game two up to 59s earlier, never later.
+      expect(maxAge(res)).toBeLessThanOrEqual(15 * 60);
+      expect(maxAge(res)).toBeGreaterThan(14 * 60);
+    });
+
+    it('never gives an idle row the long TTL when its schedule could not be read', async () => {
+      const { res, row } = await summary(team(game('post', Date.now() - 3 * 3600_000, 'Final')), { body: 'down', status: 503 });
+      expect(res.headers.get('cache-control')).toBe(`public, max-age=${SPORTS_UNSURE_S}`);
+      expect('nextStartsAt' in row).toBe(false); // unknown, not "nothing scheduled"
+    });
+
+    it('stores the next start with the schedule lines, and leaves it off a failure\'s entry', async () => {
+      const stored = async (schedRoute) => {
+        await resetTeams('10');
+        stubFetch([{ match: /teams\/10$/, body: team(null) }, { match: /teams\/10\/schedule$/, ...schedRoute }]);
+        await fetchTeamSummary('mlb', '10', 'https://api.test');
+        const entry = await (await caches.default.match(sportsKey('sched3/mlb:10'))).json();
+        await resetTeams('10');
+        return entry;
+      };
+      const next = Date.now() + 86400_000;
+      expect(await stored({ body: { events: [game('pre', next)] } })).toMatchObject({ nextAt: toMinute(next) });
+      expect(await stored({ body: { events: [] } })).toMatchObject({ nextAt: null }); // known: nothing ahead
+      expect('nextAt' in (await stored({ body: 'down', status: 503 }))).toBe(false); // unknown
+    });
+
+    it('keeps the league scoreboard digest for 30s, so a live score is at most ~90s old at the worker', async () => {
+      await resetTeams('10');
+      await seedSched('10'); // a schedule hit is what lets the scoreboard use its digest
+      stubFetch([
+        { match: /teams\/10$/, body: team(game('in', Date.now() - 3600_000, 'Top 5th')) },
+        { match: /mlb\/scoreboard$/, body: { events: [] } },
+      ]);
+      const put = vi.spyOn(Object.getPrototypeOf(caches.default), 'put');
+      try {
+        await call('/sports/team?lg=mlb&id=10');
+        const [, stored] = put.mock.calls.find(([req]) => req.url.endsWith('/__cache/sb/mlb'));
+        expect(stored.headers.get('cache-control')).toBe('max-age=30');
+      } finally {
+        put.mockRestore();
+        await resetTeams('10');
+      }
+    });
   });
 });
 
@@ -1368,8 +1586,8 @@ describe('/markets', () => {
     const t = Date.now();
     const kept = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
     await seedQuotes({
-      AAA: { value: kept, fetchedAt: t - 200_000 }, // inside 450s: reused
-      BBB: { value: { symbol: 'BBB' }, fetchedAt: t - 451_000 }, // past it: refetched
+      AAA: { value: kept, fetchedAt: t - 200_000 }, // inside a trading quote's 240s: reused
+      BBB: { value: { symbol: 'BBB' }, fetchedAt: t - 241_000 }, // past it: refetched
     });
     const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const res = await (await call('/markets?symbols=aaa,bbb')).json();
@@ -1384,21 +1602,23 @@ describe('/markets', () => {
 
   it('keeps a watchlist fresh only as long as its oldest reused quote, never a full TTL from assembly', async () => {
     // AAA fetched at t=0; the uncached list AAA,BBB assembled around it at
-    // t=449. The entry used to restart the clock there, so a board polling at
-    // t=898 still got the t=0 quote marked fresh. Now it has AAA's last second.
+    // t=239. The entry used to restart the clock there, so a board polling at
+    // t=478 still got the t=0 quote marked fresh. Now it has AAA's last second.
+    // (Neither quote says when its market traded, so both are judged trading:
+    // QUOTE_ACTIVE_S each.)
     const key = 'markets:AAA,BBB';
     await clearCache(key);
-    const t0 = Date.now() - 449_000;
+    const t0 = Date.now() - 239_000;
     const old = { symbol: 'AAA', name: 'AAA', price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0 };
     await seedQuotes({ AAA: { value: old, fetchedAt: t0 } });
     stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const first = await call('/markets?symbols=aaa,bbb');
     expect((await first.json()).indices[0]).toEqual(old); // reused, as it should be
-    expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 450s
+    expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 240s
     const entry = await caches.default.match(cacheKey('fresh', key));
-    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 450_000 + 500); // rounding slop
+    expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 240_000 + 500); // rounding slop
 
-    // Past t=450 the entry has lapsed with AAA, so AAA comes from Yahoo again
+    // Past t=240 the entry has lapsed with AAA, so AAA comes from Yahoo again
     // instead of the t=0 quote being served as fresh.
     await new Promise((r) => setTimeout(r, 1100));
     const calls = stubFetch([{ match: /chart\/AAA/, body: ySym('AAA', 222, 200) }]);
@@ -1407,10 +1627,10 @@ describe('/markets', () => {
     expect(calls).toHaveLength(1); // AAA only; BBB is still fresh in the map
     expect(body.stale).toBe(false);
     expect(body.indices[0]).toMatchObject({ symbol: 'AAA', price: 222 });
-    // Now BBB, a second or so old, is the oldest quote and bounds the list.
+    // Now BBB, a second or so old, is the first quote to expire and bounds the list.
     const maxAge = Number(/max-age=(\d+)/.exec(later.headers.get('cache-control'))[1]);
-    expect(maxAge).toBeLessThan(450);
-    expect(maxAge).toBeGreaterThan(440);
+    expect(maxAge).toBeLessThan(240);
+    expect(maxAge).toBeGreaterThan(230);
     await clearCache(key);
   });
 
@@ -1451,6 +1671,211 @@ describe('/markets', () => {
     expect(spent).toBe(45);
     expect(spent).toBeLessThan(50);
     await clearCache(key);
+  });
+
+  // A quote whose market is closed, fetched `agoS` ago: the next session opens
+  // three hours from now, so its life is the 1800s cap (see quoteFreshS).
+  const closedQuote = (sym, agoS = 0) => {
+    const nowS = Math.floor(Date.now() / 1000);
+    return {
+      symbol: sym, name: sym, price: 1, change: 0.5, changePct: 1, spark: [], spark2: [], split: 0,
+      tradedAt: nowS - agoS - 3 * 3600,
+      session: { start: nowS + 3 * 3600, end: nowS + 3 * 3600 + 23_400, gmtoffset: -14400 },
+    };
+  };
+
+  it('caches a closed market\'s quote until near its next open, capped at 30 minutes', async () => {
+    await clearCache('markets:AAPL');
+    const nowS = Math.floor(Date.now() / 1000);
+    const y = ySym('AAPL');
+    Object.assign(y.chart.result[0].meta, {
+      regularMarketTime: nowS - 3 * 3600,
+      currentTradingPeriod: { regular: { start: nowS + 5 * 3600, end: nowS + 5 * 3600 + 23_400, gmtoffset: -14400 } },
+    });
+    stubFetch([{ match: /chart\/AAPL/, body: y }]);
+    const res = await call('/markets?symbols=aapl');
+    expect(res.headers.get('cache-control')).toBe(`public, max-age=${QUOTE_IDLE_MAX_S}`);
+    // The quote carries what that was judged from; the card ignores both.
+    expect((await res.json()).indices[0]).toMatchObject({ tradedAt: nowS - 3 * 3600, session: { start: nowS + 5 * 3600 } });
+    await clearCache('markets:AAPL');
+  });
+
+  it('keeps a mixed watchlist only until its FIRST quote expires, not its oldest plus a constant', async () => {
+    // AAA: a closed market's quote, fetched 10 min ago, 20 min of life left.
+    // BBB: fetched now from a market that is trading, 4 min of life. The list
+    // must not hold BBB for AAA's remaining 20 minutes.
+    const key = 'markets:AAA,BBB';
+    await clearCache(key);
+    const t0 = Date.now() - 600_000;
+    await seedQuotes({ AAA: { value: closedQuote('AAA', 600), fetchedAt: t0 } });
+    const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
+    const res = await call('/markets?symbols=aaa,bbb');
+    const body = await res.json();
+    expect(calls).toHaveLength(1); // AAA reused from the map
+    const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get('cache-control'))[1]);
+    expect(maxAge).toBeLessThanOrEqual(QUOTE_ACTIVE_S);
+    expect(maxAge).toBeGreaterThan(QUOTE_ACTIVE_S - 10);
+    expect(body.updatedAt).toBe(Math.floor(t0 / 1000)); // "as of" is still the oldest quote
+    await clearCache(key);
+
+    // Alone, the closed quote's list lives out AAA's own remaining life.
+    await clearCache('markets:AAA');
+    const alone = await call('/markets?symbols=aaa');
+    const aloneAge = Number(/max-age=(\d+)/.exec(alone.headers.get('cache-control'))[1]);
+    expect(aloneAge).toBeLessThanOrEqual(1200);
+    expect(aloneAge).toBeGreaterThan(1190);
+    await clearCache('markets:AAA');
+  });
+});
+
+// quoteFreshS (markets.js): a quote lives 240s while its market trades and
+// until just before the next open (capped at 30 min) while it is closed. The
+// session shapes are Yahoo's own: currentTradingPeriod.regular as recorded in
+// test/fixtures/yahoo-gspc.json and read live on 2026-09-25 (a Friday).
+describe('quote freshness by trading activity', () => {
+  const at = (iso) => Date.parse(iso) / 1000;
+  const life = (q, iso) => quoteFreshS(q, Date.parse(iso));
+  const NY = -14400;
+  const NY_FRI = { start: at('2026-09-25T13:30:00Z'), end: at('2026-09-25T20:00:00Z'), gmtoffset: NY };
+  const NY_MON = { start: at('2026-09-28T13:30:00Z'), end: at('2026-09-28T20:00:00Z'), gmtoffset: NY };
+  const MON_OPEN = NY_MON.start;
+  const FRI_CLOSE_PRINT = at('2026-09-25T20:00:05Z');
+  const quote = (session, tradedAt) => ({ symbol: '^GSPC', price: 1, session, tradedAt });
+
+  it('carries regularMarketTime and the regular session from the recorded fixture', () => {
+    const meta = yahooFx.chart.result[0].meta;
+    const q = mapYahooChart(yahooFx, 'S&P 500');
+    expect(q.tradedAt).toBe(meta.regularMarketTime);
+    expect(q.session).toEqual({
+      start: meta.currentTradingPeriod.regular.start,
+      end: meta.currentTradingPeriod.regular.end,
+      gmtoffset: -14400,
+    });
+    // Recorded on a Wednesday evening, with Yahoo already naming Thursday's
+    // session: five minutes after the last print it still counts as trading,
+    // an hour after it the quote may live the full half hour.
+    expect(quoteFreshS(q, (meta.regularMarketTime + 300) * 1000)).toBe(QUOTE_ACTIVE_S);
+    expect(quoteFreshS(q, (meta.regularMarketTime + 3600) * 1000)).toBe(QUOTE_IDLE_MAX_S);
+    // A payload without them (an older quote in the map) is judged trading.
+    expect(mapYahooChart({ chart: { result: [{ meta: { symbol: 'X', regularMarketPrice: 1, chartPreviousClose: 1 } }] } }))
+      .toMatchObject({ tradedAt: null, session: null });
+  });
+
+  it('a trading quote lives 240s, including a 24-hour market and the closing auction', () => {
+    expect(QUOTE_ACTIVE_S).toBe(240);
+    expect(life(quote(NY_FRI, at('2026-09-25T15:00:00Z')), '2026-09-25T15:00:30Z')).toBe(240);
+    const btc = { start: at('2026-09-25T00:00:00Z'), end: at('2026-09-25T23:59:00Z'), gmtoffset: 0 };
+    expect(life(quote(btc, at('2026-09-25T13:53:19Z')), '2026-09-25T13:53:30Z')).toBe(240);
+    // Past the bell, but the last print is minutes old: still settling.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:05:00Z')).toBe(240);
+  });
+
+  it('Friday\'s close is never served as closed past Monday\'s open, whichever session Yahoo names', () => {
+    expect(QUOTE_IDLE_MAX_S).toBe(1800);
+    // Friday evening: the full half hour, not a weekend.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:30:00Z')).toBe(1800);
+    for (const session of [NY_FRI, NY_MON]) { // Yahoo not yet rolled over, and rolled
+      for (let t = at('2026-09-25T20:16:00Z'); t < MON_OPEN; t += 7 * 60) {
+        const l = quoteFreshS(quote(session, FRI_CLOSE_PRINT), t * 1000);
+        expect(l).toBeGreaterThanOrEqual(QUOTE_ACTIVE_S);
+        expect(l).toBeLessThanOrEqual(QUOTE_IDLE_MAX_S);
+        // Gone by the open, or held no longer than a trading quote would be.
+        if (l > QUOTE_ACTIVE_S) expect(t + l).toBeLessThanOrEqual(MON_OPEN);
+        expect(t + l).toBeLessThanOrEqual(MON_OPEN + QUOTE_ACTIVE_S);
+      }
+    }
+    // Once Monday's session is under way the Friday print is trading data again.
+    expect(life(quote(NY_MON, FRI_CLOSE_PRINT), '2026-09-28T13:31:00Z')).toBe(240);
+    // Not rolled over: Saturday is idle, Sunday's would-be session hours are
+    // judged trading (the price of not knowing which week an exchange keeps),
+    // and after them the projection lands on Monday, not Tuesday.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-26T15:00:00Z')).toBe(1800);
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-27T15:00:00Z')).toBe(240);
+    expect(nextOpenS(NY_FRI, at('2026-09-28T02:00:00Z'))).toBe(MON_OPEN - 3600);
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-28T12:00:00Z')).toBe(1800);
+  });
+
+  it('a projected session that has opened is trading, not skipped for the next day\'s', () => {
+    // Yahoo still names Friday's session on Monday: Monday's open, as projected,
+    // has come, so a stale Friday print must not earn the idle half hour.
+    const fri = quote(NY_FRI, FRI_CLOSE_PRINT);
+    expect(life(fri, '2026-09-28T13:29:00Z')).toBe(240); // inside the projection margin
+    expect(life(fri, '2026-09-28T13:30:00Z')).toBe(240); // at the open
+    expect(life(fri, '2026-09-28T13:31:00Z')).toBe(240); // just after it
+    expect(life(fri, '2026-09-28T17:00:00Z')).toBe(240); // mid-session
+    expect(life(fri, '2026-09-28T20:30:00Z')).toBe(240); // an hour's margin past the close
+    // Once Monday's session and its margin are over, idle until Tuesday's.
+    expect(life(fri, '2026-09-28T21:30:00Z')).toBe(1800);
+    expect(nextOpenS(NY_FRI, at('2026-09-28T21:30:00Z'))).toBe(at('2026-09-29T13:30:00Z') - 3600);
+    // The session Yahoo names itself, under way, reads as an open already reached.
+    expect(nextOpenS(NY_MON, at('2026-09-28T15:00:00Z'))).toBeLessThanOrEqual(at('2026-09-28T15:00:00Z'));
+  });
+
+  it('a projected session is trading across a daylight-saving change, either way', () => {
+    // Spring-forward: Friday 2027-03-12 opens 14:30Z, closes 21:00Z; Monday
+    // 2027-03-15 really opens 13:30Z, closes 20:00Z.
+    const spring = quote({ start: at('2027-03-12T14:30:00Z'), end: at('2027-03-12T21:00:00Z'), gmtoffset: -18000 }, at('2027-03-12T21:00:05Z'));
+    for (const iso of ['2027-03-15T13:30:00Z', '2027-03-15T14:31:00Z', '2027-03-15T17:00:00Z', '2027-03-15T19:59:00Z']) {
+      expect(life(spring, iso)).toBe(240);
+    }
+    // Fall-back: Friday 2026-10-30 opens 13:30Z, closes 20:00Z; Monday
+    // 2026-11-02 really opens 14:30Z, closes 21:00Z. The projection says
+    // 13:30Z-20:00Z, so the real session's last hour rides on the margin.
+    const fall = quote({ start: at('2026-10-30T13:30:00Z'), end: at('2026-10-30T20:00:00Z'), gmtoffset: -14400 }, at('2026-10-30T20:00:05Z'));
+    for (const iso of ['2026-11-02T14:30:00Z', '2026-11-02T14:31:00Z', '2026-11-02T17:00:00Z', '2026-11-02T20:30:00Z', '2026-11-02T20:59:00Z']) {
+      expect(life(fall, iso)).toBe(240);
+    }
+    expect(life(fall, '2026-11-02T21:05:00Z')).toBe(1800);
+  });
+
+  it('a Sunday-to-Thursday market reopens on Sunday (Tadawul, 10:00-15:00 local, UTC+3)', () => {
+    // Thursday 2026-09-24's session, as Yahoo would still name it on Sunday.
+    const thu = { start: at('2026-09-24T07:00:00Z'), end: at('2026-09-24T12:00:00Z'), gmtoffset: 10800 };
+    const q = quote(thu, at('2026-09-24T12:00:05Z'));
+    const SUN_OPEN = at('2026-09-27T07:00:00Z');
+    expect(nextOpenS(thu, at('2026-09-26T12:00:00Z'))).toBe(SUN_OPEN - 3600); // Saturday: Sunday, not Monday
+    expect(life(q, '2026-09-26T12:00:00Z')).toBe(1800);
+    expect(life(q, '2026-09-27T05:00:00Z')).toBe(1800); // gone by 05:30Z, before the open
+    expect(life(q, '2026-09-27T06:55:00Z')).toBe(240); // five minutes before the open
+    expect(life(q, '2026-09-27T07:05:00Z')).toBe(240);
+    // Its would-be Friday session hours are judged trading: the cost of
+    // keeping no exchange table, paid on the fresh side.
+    expect(life(q, '2026-09-25T09:00:00Z')).toBe(240);
+  });
+
+  it('projects across a daylight-saving change without landing after the real open', () => {
+    // Friday 2027-03-12 New York opens 14:30Z (EST); Monday 2027-03-15, after
+    // spring-forward, 13:30Z. A Friday session projected by whole days says
+    // 14:30Z Monday: an hour late, which the projection margin absorbs.
+    const fri = { start: at('2027-03-12T14:30:00Z'), end: at('2027-03-12T21:00:00Z'), gmtoffset: -18000 };
+    const realOpen = at('2027-03-15T13:30:00Z');
+    // Each fetch is more than a trading quote's life before the real open, so
+    // each must be gone by it.
+    for (const iso of ['2027-03-15T11:00:00Z', '2027-03-15T12:45:00Z', '2027-03-15T13:05:00Z']) {
+      const l = life(quote(fri, at('2027-03-12T21:00:05Z')), iso);
+      expect(l).toBeGreaterThanOrEqual(QUOTE_ACTIVE_S);
+      expect(at(iso) + l).toBeLessThanOrEqual(realOpen);
+    }
+    // Friday evening, the same projection still earns the full half hour.
+    expect(life(quote(fri, at('2027-03-12T21:00:05Z')), '2027-03-12T22:00:00Z')).toBe(QUOTE_IDLE_MAX_S);
+  });
+
+  it('projects the next open when Yahoo still names the finished session (Tokyo, live 2026-09-25)', () => {
+    // 13:52Z Friday, seven hours after Tokyo closed, the session read Friday's.
+    const tokyo = { start: at('2026-09-25T00:00:00Z'), end: at('2026-09-25T06:30:00Z'), gmtoffset: 32400 };
+    // Saturday is skipped; Sunday stays a possible session day (see nextOpenS),
+    // so the projection is Sunday's 00:00Z, less the margin.
+    expect(nextOpenS(tokyo, at('2026-09-25T13:52:00Z'))).toBe(at('2026-09-27T00:00:00Z') - 3600);
+    expect(life(quote(tokyo, at('2026-09-25T06:45:03Z')), '2026-09-25T13:52:00Z')).toBe(1800);
+    // A session Yahoo already names as next is taken as stated, less a minute.
+    expect(nextOpenS(NY_MON, at('2026-09-26T12:00:00Z'))).toBe(MON_OPEN - 60);
+  });
+
+  it('a quote that cannot say enough is judged trading, and an unforeseeable open gets 900s', () => {
+    expect(life({ symbol: 'OLD' }, '2026-09-26T12:00:00Z')).toBe(QUOTE_ACTIVE_S); // from before these fields
+    expect(life(quote(null, null), '2026-09-26T12:00:00Z')).toBe(QUOTE_ACTIVE_S);
+    expect(life(quote(null, at('2026-09-25T20:00:05Z')), '2026-09-26T12:00:00Z')).toBe(QUOTE_UNKNOWN_OPEN_S);
+    expect(QUOTE_UNKNOWN_OPEN_S).toBe(900);
   });
 });
 
@@ -3029,14 +3454,18 @@ describe('route TTLs sit above the card poll interval', () => {
     ['/amtrak/departures', 'amtrak', any({}), {}, 90], // amtrak.js 60s
     ['/ferry/departures', 'ferry', any(FERRY, { raw: true }), {}, 90], // ferry.js 60s
     ['/path/realtime', 'path', any({}), {}, 90], // path.js 60s
-    ['/markets?symbols=aapl', 'markets:AAPL', any(YAHOO), {}, 450], // markets.js 5 min
+    // markets.js 5 min. A quote that cannot say its market is closed is judged
+    // trading: 240s, UNDER the poll on purpose. See 'quote freshness by trading'.
+    ['/markets?symbols=aapl', 'markets:AAPL', any(YAHOO), {}, 240],
     ['/golf', 'golf', any({}), {}, 450], // golf.js 5 min
     ['/tennis', 'tennis', any({}), {}, 450], // tennis.js 5 min
     ['/tfl/status', 'tfl', any([]), {}, 180], // tfl.js 2 min
     ['/alerts/subway', 'alerts:subway', any({ entity: [] }), {}, 180], // subway.js 2 min
     ['/alerts/lirr', 'alerts:lirr', any({ entity: [] }), {}, 120], // lirr.js 60s (already 2x)
     ['/alerts/mnr', 'alerts:mnr', any({ entity: [] }), {}, 120], // mnr.js 60s (already 2x)
-    ['/sports/team?lg=mlb&id=nyy', 'sports:mlb:nyy', any(TEAM), {}, 180], // sports.js 2 min
+    // sports.js 2 min. This row is idle (no game, nothing scheduled). A live
+    // row is 60s, UNDER the poll on purpose: see '/sports/team TTL by game state'.
+    ['/sports/team?lg=mlb&id=nyy', 'sports:mlb:nyy', any(TEAM), {}, 900],
     ['/njt/departures', njtKey(), [
       { match: /getToken/, body: TOKEN_RESPONSE, times: 2 },
       { match: /getStation/, body: [], times: 4 },
