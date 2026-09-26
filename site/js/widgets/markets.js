@@ -303,12 +303,42 @@ export function orderBySymbols(indices, symbols) {
   ];
 }
 
+// A quote the worker has not called closed is open: a payload from before it
+// sent `open` (an older worker, a cached payload mid-rollout) reads as today.
+const isOpen = (ix) => ix?.open !== false;
+
+// The header note, on the card and on the wall behind the tap. It dates only
+// the quotes still trading, from the OLDEST of their fetches: a closed market's
+// quote is as new as it gets until the open, so its age says nothing about how
+// current the list is. With every quote closed the note is just "Closed", said
+// once here rather than on each row. A quote without its own fetchedAt is
+// dated by the payload's updatedAt, so an older payload gets exactly the old
+// note. A worker fetch time, not render time, and a clock reading, so it
+// honors clock24. Empty when there is nothing to date.
+export function marketsNote(vm, clock24) {
+  const indices = vm?.indices ?? [];
+  const open = indices.filter(isOpen);
+  if (indices.length && !open.length) return 'Closed';
+  const stamps = open
+    .map((ix) => (Number.isFinite(ix.fetchedAt) ? ix.fetchedAt : vm.updatedAt))
+    .filter(Number.isFinite);
+  const at = stamps.length ? Math.min(...stamps) : vm?.updatedAt;
+  return at ? `as of ${fmtClock(at, clock24)}` : '';
+}
+
 export function render(el, vm, cfg) {
-  // Freshness note in the card header (worker fetch time, not render time) —
-  // a clock reading, so it honors cfg.clock24.
-  if (vm.updatedAt) setCardNote(el, `as of ${fmtClock(vm.updatedAt, cfg?.clock24)}`);
+  const note = marketsNote(vm, cfg?.clock24);
+  if (note) setCardNote(el, note);
   // Config order once, for BOTH the card and the wall behind the tap.
   const indices = orderBySymbols(vm.indices, cfg?.markets?.symbols ?? []);
+  // A closed quote in a list that is still partly trading gets a CLOSED label
+  // under its deltas, because the header's clock no longer speaks for it. Not
+  // when every quote is closed (the header says it once), and not on the
+  // 2-row tier, whose one-line rows have no spare line: a label there squeezes
+  // the names. The label is absolutely placed (main.css), so rows keep their
+  // height and the fit below never sees it.
+  const markClosed =
+    cardSize(el, [4, 4])[1] > 2 && indices.some(isOpen) && indices.some((ix) => !isOpen(ix));
   // At full width (4 cols — markets caps there, see MAX_SIZE) show the
   // two-session sparkline; the 3-wide min keeps the compact last-session shape.
   // Width is a presentation branch rather than a count, so it is read here and
@@ -327,14 +357,15 @@ export function render(el, vm, cfg) {
         ? `<div class="indexes" style="--n:${rows.length}">` + rows
             .map((ix) => {
               const up = ix.change >= 0;
-              return `<div class="index">
+              const closed = markClosed && !isOpen(ix);
+              return `<div class="index${closed ? ' index--closed' : ''}">
             <div class="index__info">
               <span class="index__name">${escapeHtml(ix.name)}</span>
               <span class="index__price">${fmt.format(ix.price)}</span>
             </div>
             ${sparkSvg({ ...ix, twoDay })}
             <span class="delta delta__chg ${up ? 'delta--up' : 'delta--down'}">${up ? '▲' : '▼'} ${fmt.format(Math.abs(ix.change))}</span>
-            <span class="delta delta__pct ${up ? 'delta--up' : 'delta--down'}">(${Math.abs(ix.changePct).toFixed(2)}%)</span>
+            <span class="delta delta__pct ${up ? 'delta--up' : 'delta--down'}">(${Math.abs(ix.changePct).toFixed(2)}%)${closed ? '<span class="index__closed">Closed</span>' : ''}</span>
           </div>`;
             })
             .join('') + '</div>'
@@ -345,8 +376,8 @@ export function render(el, vm, cfg) {
   // Rows here are not tappable, so the whole card is the target and the +N badge
   // is a passive signifier — the two must agree exactly: no badge, no expansion.
   // The closure captures THIS render's vm, so the overlay always shows what the
-  // card was showing when it was tapped.
-  const note = vm.updatedAt ? `as of ${fmtClock(vm.updatedAt, cfg?.clock24)}` : '';
+  // card was showing when it was tapped, header note included. The wall's
+  // tiles carry no CLOSED label: that treatment is the card's alone.
   setExpandSource(
     el,
     shown && hidden > 0

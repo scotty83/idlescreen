@@ -2099,6 +2099,21 @@ body.mode-ambient .gear--edit { display: none; }
   row-gap: clamp(8px, calc((100% - var(--n, 3) * var(--mrow)) / max(var(--n, 3) - 1, 1)), 24px);
 }
 .card--markets.t-s .indexes { --mrow: 33px; }
+/* A closed quote in a list that is still partly trading (markets.js marks it,
+   3 rows tall and up only): its deltas ride up to the name line and CLOSED
+   sits under them on the price line, flush right with the percentage. The
+   label is absolute, so the row keeps its height and the fit is unchanged.
+   It would inherit the deltas' Light family (Momentum, below), so the family
+   is set back to the board face: on the device, 600 asked of the Light-only
+   family can only be a synthesized bold. */
+.card--markets .index--closed .delta { align-self: start; margin-top: 1px; }
+.card--markets .index--closed .delta__pct { position: relative; }
+.card--markets .index__closed {
+  position: absolute; right: 0; top: calc(100% + 3px);
+  font-family: var(--font-board); font-size: 17px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; line-height: 1.2;
+  color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 /* History when shallow or narrow: clamp each event to two lines so the rows
    stay bounded and never overflow (narrow cards wrap text into tall rows) */
 .card--history.t-s .history__text,
