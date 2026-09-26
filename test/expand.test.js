@@ -271,26 +271,39 @@ describe('markets card tap', () => {
     expect(overlay().querySelector('.expand__note').textContent).toBe(AS_OF);
   });
 
-  it('gives the wall the card\'s header rule, and no CLOSED labels on its tiles', () => {
+  it('gives the wall the card\'s header rule, and CLOSED on its closed tiles', () => {
     const symbols = ['^DJI', '^IXIC', '^GSPC', 'AAPL', 'MSFT', 'NVDA'];
     const withState = (vm, state) => ({
       ...vm,
       indices: vm.indices.map((ix, i) => ({ ...ix, ...state(i) })),
     });
+    const labelled = () =>
+      [...overlay().querySelectorAll('.tile')]
+        .filter((t) => t.querySelector('.tile__closed'))
+        .map((t) => t.querySelector('.tile__sym').textContent);
     // Mixed: the note dates the oldest OPEN quote (+120), not the closed +0.
     const mixed = withState(vmOf(symbols), (i) => ({ open: i !== 1, fetchedAt: STAMP_EPOCH + (i === 1 ? 0 : 120 + i) }));
     const { card } = board(mixed, [4, 4]);
     expect(card.querySelector('.index__closed')).not.toBeNull(); // the card marks its closed row
     card.click();
     expect(overlay().querySelector('.expand__note').textContent).toBe(`as of ${fmtClock(STAMP_EPOCH + 120)}`);
-    expect(overlay().textContent).not.toMatch(/closed/i);
+    expect(labelled()).toEqual(['Nasdaq']);
     closeExpand();
 
-    // All closed: the wall's note says so too.
+    // The 2-row card has no room for its row labels, but the wall has: the
+    // wall's rule does not follow the card's size.
+    const short = board(mixed, [3, 2]).card;
+    expect(short.querySelector('.index__closed')).toBeNull();
+    short.click();
+    expect(labelled()).toEqual(['Nasdaq']);
+    closeExpand();
+
+    // All closed: the wall's note says so, once, and the tiles stay unlabelled.
     const shut = withState(vmOf(symbols), () => ({ open: false, fetchedAt: STAMP_EPOCH }));
     const again = board(shut, [3, 2]).card;
     again.click();
     expect(overlay().querySelector('.expand__note').textContent).toBe('Closed');
+    expect(overlay().querySelector('.tile__closed')).toBeNull();
   });
 
   it('is inert when nothing is hidden: no badge, no expansion', () => {
@@ -393,6 +406,58 @@ describe('markets ticker wall', () => {
     ]));
     expect(wall.querySelector('img')).toBeNull();
     expect(wall.querySelector('.tile__sym').textContent).toBe('X<Y');
+  });
+
+  // Closed markets: a list still partly trading marks its closed tiles with
+  // CLOSED on the name line; a list wholly closed, or a payload from before
+  // the worker sent `open`, marks none.
+  describe('closed tiles', () => {
+    const withOpen = (syms, closed) =>
+      vmOf(syms).indices.map((ix) => ({ ...ix, open: !closed.includes(ix.symbol) }));
+    const labelled = (wall) =>
+      [...wall.querySelectorAll('.tile')]
+        .filter((t) => t.querySelector('.tile__closed'))
+        .map((t) => t.querySelector('.tile__sym').textContent);
+
+    it('labels only the closed tiles of a mixed list, shelf and grid alike', () => {
+      const wall = wallOf(tileWall(withOpen(['^DJI', '^IXIC', 'AAPL', 'MSFT', 'NVDA'], ['^IXIC', 'MSFT'])));
+      expect(labelled(wall)).toEqual(['Nasdaq', 'MSFT']);
+      for (const label of wall.querySelectorAll('.tile__closed')) {
+        expect(label.textContent).toBe('Closed');
+        // On the name line, after the name, which is still there.
+        const foot = label.parentElement;
+        expect(foot.classList.contains('tile__foot')).toBe(true);
+        expect(foot.firstElementChild.classList.contains('tile__name')).toBe(true);
+        expect(foot.lastElementChild).toBe(label);
+      }
+      // An open tile keeps its plain name line.
+      expect(wall.querySelectorAll('.tile__foot')).toHaveLength(2);
+      expect(wall.querySelectorAll('.tile__name')).toHaveLength(5);
+    });
+
+    it('labels no tile when every quote is closed: the header says it once', () => {
+      const syms = ['^DJI', '^IXIC', 'AAPL', 'MSFT'];
+      const wall = wallOf(tileWall(withOpen(syms, syms)));
+      expect(wall.querySelector('.tile__closed')).toBeNull();
+      expect(wall.querySelector('.tile__foot')).toBeNull();
+    });
+
+    it('labels no tile in a payload without `open` (missing reads as open)', () => {
+      const wall = wallOf(tileWall(vmOf(['^DJI', '^IXIC', 'AAPL', 'MSFT']).indices));
+      expect(wall.querySelector('.tile__closed')).toBeNull();
+      expect(wall.querySelector('.tile__foot')).toBeNull();
+    });
+
+    it('still escapes the name beside the label', () => {
+      const wall = wallOf(tileWall([
+        { symbol: 'OPEN', name: 'Open Co', price: 1, change: 1, changePct: 1, spark: [1, 2], open: true },
+        { symbol: 'X<Y', name: '<img src=x>', price: 1, change: 1, changePct: 1, spark: [1, 2], open: false },
+      ]));
+      expect(wall.querySelector('img')).toBeNull();
+      const foot = wall.querySelector('.tile__foot');
+      expect(foot.querySelector('.tile__name').textContent).toBe('<img src=x>');
+      expect(foot.querySelector('.tile__closed').textContent).toBe('Closed');
+    });
   });
 
   it('sizes the grid to the ticker count', () => {
