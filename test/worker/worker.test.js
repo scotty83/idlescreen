@@ -1141,18 +1141,29 @@ describe('/sports/team TTL by game state', () => {
   it('a postponed game (pre, dated six hours or more ago) waits on the NEXT game, not its own date', () => {
     const postponed = { state: 'pre', startsAt: S - 7 * 3600 };
     expect(ttl({ ...postponed, nextStartsAt: S + 86400 })).toBe(900);
-    expect(ttl({ ...postponed, nextStartsAt: S + 15 * MIN })).toBe(5 * MIN);
+    expect(ttl({ ...postponed, nextStartsAt: S + 21 * MIN })).toBe(11 * MIN);
+    // The next game inside its 20-minute window, or under way: live, as a pre row.
+    expect(ttl({ ...postponed, nextStartsAt: S + 20 * MIN })).toBe(60);
+    expect(ttl({ ...postponed, nextStartsAt: S + 15 * MIN })).toBe(60);
+    expect(ttl({ ...postponed, nextStartsAt: S - 30 * MIN })).toBe(60);
     expect(ttl({ ...postponed, nextStartsAt: null })).toBe(900); // nothing else scheduled
     expect(ttl(postponed)).toBe(SPORTS_UNSURE_S); // the schedule could not be read
   });
 
-  it('a final with a doubleheader to come expires ten minutes before game two', () => {
+  it('a final with a doubleheader to come expires ten minutes before game two, and is live inside its 20-minute window', () => {
     const final = { state: 'post', startsAt: S - 3 * 3600 };
     expect(ttl({ ...final, nextStartsAt: S + 40 * MIN })).toBe(900);
-    expect(ttl({ ...final, nextStartsAt: S + 15 * MIN })).toBe(5 * MIN);
-    expect(ttl({ ...final, nextStartsAt: S + 5 * MIN })).toBe(60); // floored, never 0 or less
+    expect(ttl({ ...final, nextStartsAt: S + 21 * MIN })).toBe(11 * MIN);
+    // Inside game two's 20-minute window the final is treated as a pre row
+    // would be: live, not left to idle until ten minutes out.
+    expect(ttl({ ...final, nextStartsAt: S + 20 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S + 15 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S + 5 * MIN })).toBe(60);
     // Game one ran long past game two's nominal start: game two is due now.
     expect(ttl({ ...final, nextStartsAt: S - 20 * MIN })).toBe(60);
+    expect(ttl({ ...final, nextStartsAt: S - (6 * 60 - 1) * MIN })).toBe(60);
+    // Same for a team with no game on its row yet.
+    expect(ttl({ state: 'none', startsAt: null, nextStartsAt: S + 15 * MIN })).toBe(60);
   });
 
   it('an idle row with nothing scheduled lives the maximum; one whose schedule failed never does', () => {
@@ -1184,6 +1195,24 @@ describe('/sports/team TTL by game state', () => {
       .toBe(Date.parse('2026-09-27T19:20Z') / 1000);
     expect(nextStartAt({ events: [ev('2026-09-24T23:05Z', 'post')] }, NOW)).toBeNull();
     expect(nextStartAt({}, NOW)).toBeNull();
+  });
+
+  it('nextStartAt counts a game the schedule already calls live as starting now', () => {
+    const ev = (date, state) => ({ date, competitions: [{ status: { type: { state } } }] });
+    // A doubleheader's game two under way in the schedule, game one final:
+    // whatever game two's date says, the next start is now.
+    const sched = { events: [
+      ev('2026-09-25T13:05Z', 'post'),
+      ev('2026-09-25T17:05Z', 'in'),
+      ev('2026-09-26T17:05Z', 'pre'),
+    ] };
+    expect(nextStartAt(sched, NOW)).toBe(S);
+    // Dated long enough ago to read as postponed were it 'pre', or not dated
+    // at all: live all the same.
+    expect(nextStartAt({ events: [ev('2026-09-25T08:00Z', 'in')] }, NOW)).toBe(S);
+    expect(nextStartAt({ events: [ev(undefined, 'in')] }, NOW)).toBe(S);
+    // So the final on the row lives a minute, not until tomorrow's game.
+    expect(ttl({ state: 'post', startsAt: S - 5 * 3600, nextStartsAt: nextStartAt(sched, NOW) })).toBe(60);
   });
 
   describe('on the route', () => {
@@ -1224,6 +1253,18 @@ describe('/sports/team TTL by game state', () => {
       // Additive fields the card ignores.
       expect(idle.row.startsAt).toBe(toMinute(started));
       expect(idle.row.nextStartsAt).toBe(toMinute(tomorrow));
+    });
+
+    it('serves a final for a minute while the schedule already has game two under way', async () => {
+      // The team endpoint still points at game one's final; the schedule has
+      // moved on to game two, live.
+      const gameOne = Date.now() - 4 * 3600_000;
+      const gameTwo = { ...game('in', Date.now() - 30 * 60_000, 'Top 2nd'), id: '78' };
+      const { res, row } = await summary(team(game('post', gameOne, 'Final')), {
+        body: { events: [game('post', gameOne, 'Final'), gameTwo, game('pre', Date.now() + 86400_000)] },
+      });
+      expect(row.state).toBe('post');
+      expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     });
 
     it('holds a final only until ten minutes before a doubleheader\'s game two', async () => {
@@ -1745,6 +1786,61 @@ describe('quote freshness by trading activity', () => {
     }
     // Once Monday's session is under way the Friday print is trading data again.
     expect(life(quote(NY_MON, FRI_CLOSE_PRINT), '2026-09-28T13:31:00Z')).toBe(240);
+    // Not rolled over: Saturday is idle, Sunday's would-be session hours are
+    // judged trading (the price of not knowing which week an exchange keeps),
+    // and after them the projection lands on Monday, not Tuesday.
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-26T15:00:00Z')).toBe(1800);
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-27T15:00:00Z')).toBe(240);
+    expect(nextOpenS(NY_FRI, at('2026-09-28T02:00:00Z'))).toBe(MON_OPEN - 3600);
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-28T12:00:00Z')).toBe(1800);
+  });
+
+  it('a projected session that has opened is trading, not skipped for the next day\'s', () => {
+    // Yahoo still names Friday's session on Monday: Monday's open, as projected,
+    // has come, so a stale Friday print must not earn the idle half hour.
+    const fri = quote(NY_FRI, FRI_CLOSE_PRINT);
+    expect(life(fri, '2026-09-28T13:29:00Z')).toBe(240); // inside the projection margin
+    expect(life(fri, '2026-09-28T13:30:00Z')).toBe(240); // at the open
+    expect(life(fri, '2026-09-28T13:31:00Z')).toBe(240); // just after it
+    expect(life(fri, '2026-09-28T17:00:00Z')).toBe(240); // mid-session
+    expect(life(fri, '2026-09-28T20:30:00Z')).toBe(240); // an hour's margin past the close
+    // Once Monday's session and its margin are over, idle until Tuesday's.
+    expect(life(fri, '2026-09-28T21:30:00Z')).toBe(1800);
+    expect(nextOpenS(NY_FRI, at('2026-09-28T21:30:00Z'))).toBe(at('2026-09-29T13:30:00Z') - 3600);
+    // The session Yahoo names itself, under way, reads as an open already reached.
+    expect(nextOpenS(NY_MON, at('2026-09-28T15:00:00Z'))).toBeLessThanOrEqual(at('2026-09-28T15:00:00Z'));
+  });
+
+  it('a projected session is trading across a daylight-saving change, either way', () => {
+    // Spring-forward: Friday 2027-03-12 opens 14:30Z, closes 21:00Z; Monday
+    // 2027-03-15 really opens 13:30Z, closes 20:00Z.
+    const spring = quote({ start: at('2027-03-12T14:30:00Z'), end: at('2027-03-12T21:00:00Z'), gmtoffset: -18000 }, at('2027-03-12T21:00:05Z'));
+    for (const iso of ['2027-03-15T13:30:00Z', '2027-03-15T14:31:00Z', '2027-03-15T17:00:00Z', '2027-03-15T19:59:00Z']) {
+      expect(life(spring, iso)).toBe(240);
+    }
+    // Fall-back: Friday 2026-10-30 opens 13:30Z, closes 20:00Z; Monday
+    // 2026-11-02 really opens 14:30Z, closes 21:00Z. The projection says
+    // 13:30Z-20:00Z, so the real session's last hour rides on the margin.
+    const fall = quote({ start: at('2026-10-30T13:30:00Z'), end: at('2026-10-30T20:00:00Z'), gmtoffset: -14400 }, at('2026-10-30T20:00:05Z'));
+    for (const iso of ['2026-11-02T14:30:00Z', '2026-11-02T14:31:00Z', '2026-11-02T17:00:00Z', '2026-11-02T20:30:00Z', '2026-11-02T20:59:00Z']) {
+      expect(life(fall, iso)).toBe(240);
+    }
+    expect(life(fall, '2026-11-02T21:05:00Z')).toBe(1800);
+  });
+
+  it('a Sunday-to-Thursday market reopens on Sunday (Tadawul, 10:00-15:00 local, UTC+3)', () => {
+    // Thursday 2026-09-24's session, as Yahoo would still name it on Sunday.
+    const thu = { start: at('2026-09-24T07:00:00Z'), end: at('2026-09-24T12:00:00Z'), gmtoffset: 10800 };
+    const q = quote(thu, at('2026-09-24T12:00:05Z'));
+    const SUN_OPEN = at('2026-09-27T07:00:00Z');
+    expect(nextOpenS(thu, at('2026-09-26T12:00:00Z'))).toBe(SUN_OPEN - 3600); // Saturday: Sunday, not Monday
+    expect(life(q, '2026-09-26T12:00:00Z')).toBe(1800);
+    expect(life(q, '2026-09-27T05:00:00Z')).toBe(1800); // gone by 05:30Z, before the open
+    expect(life(q, '2026-09-27T06:55:00Z')).toBe(240); // five minutes before the open
+    expect(life(q, '2026-09-27T07:05:00Z')).toBe(240);
+    // Its would-be Friday session hours are judged trading: the cost of
+    // keeping no exchange table, paid on the fresh side.
+    expect(life(q, '2026-09-25T09:00:00Z')).toBe(240);
   });
 
   it('projects across a daylight-saving change without landing after the real open', () => {
@@ -1767,7 +1863,9 @@ describe('quote freshness by trading activity', () => {
   it('projects the next open when Yahoo still names the finished session (Tokyo, live 2026-09-25)', () => {
     // 13:52Z Friday, seven hours after Tokyo closed, the session read Friday's.
     const tokyo = { start: at('2026-09-25T00:00:00Z'), end: at('2026-09-25T06:30:00Z'), gmtoffset: 32400 };
-    expect(nextOpenS(tokyo, at('2026-09-25T13:52:00Z'))).toBe(at('2026-09-28T00:00:00Z') - 3600); // Monday, less the margin
+    // Saturday is skipped; Sunday stays a possible session day (see nextOpenS),
+    // so the projection is Sunday's 00:00Z, less the margin.
+    expect(nextOpenS(tokyo, at('2026-09-25T13:52:00Z'))).toBe(at('2026-09-27T00:00:00Z') - 3600);
     expect(life(quote(tokyo, at('2026-09-25T06:45:03Z')), '2026-09-25T13:52:00Z')).toBe(1800);
     // A session Yahoo already names as next is taken as stated, less a minute.
     expect(nextOpenS(NY_MON, at('2026-09-26T12:00:00Z'))).toBe(MON_OPEN - 60);

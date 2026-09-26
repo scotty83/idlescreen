@@ -72,27 +72,40 @@ export const QUOTE_UNKNOWN_OPEN_S = 900;
 const RECENT_TRADE_S = 15 * 60;
 // Expire this long before a next open Yahoo states outright...
 const OPEN_MARGIN_S = 60;
-// ...and this long before one projected from an earlier session, which a
-// daylight-saving change can move an hour EARLIER in UTC (New York's open is
-// 14:30Z the Friday before spring-forward and 13:30Z the Monday after).
+// ...and this long around one projected from an earlier session, which a
+// daylight-saving change can move an hour either way in UTC (New York's open is
+// 14:30Z the Friday before spring-forward and 13:30Z the Monday after; 13:30Z
+// the Friday before fall-back and 14:30Z the Monday after).
 const PROJECTED_MARGIN_S = 3600;
 const DAY_S = 86400;
+const SATURDAY = 6;
 
-// When a quote from a closed market must expire (epoch seconds), or null.
+// When a quote from a closed market must expire (epoch seconds), or null. A
+// time at or before nowS means the market is trading, or about to.
 // Yahoo's currentTradingPeriod.regular names the next session once it rolls
 // over, but that rollover is the exchange's own schedule, not the close: New
 // York's read the NEXT day's session the evening of the recorded fixture,
 // while Tokyo's still read Friday's at 13:52Z Friday, seven hours after it
 // closed (checked live 2026-09-25). So a session already past is projected
-// forward a day at a time to the next exchange-local weekday. Holidays are not
-// known here; QUOTE_IDLE_MAX_S covers them.
+// forward a day at a time, and the first projected session not yet over, open
+// or not, is the answer: a session that opened since Yahoo last rolled over is
+// trading, not skipped for tomorrow's. Holidays are not known here;
+// QUOTE_IDLE_MAX_S covers them.
+//
+// Every exchange-local day but Saturday is a possible session day. Mon-Fri
+// markets and the Sun-Thu ones (Tadawul, Qatar, Kuwait, Bahrain, Egypt) share
+// that rule with no exchange table to keep, at a cost that errs toward
+// freshness: a Mon-Fri quote is judged trading (QUOTE_ACTIVE_S) through its
+// would-be Sunday session hours, and a Sun-Thu quote through its would-be
+// Friday ones.
 export function nextOpenS(session, nowS) {
   if (!session) return null;
-  if (session.start > nowS) return session.start - OPEN_MARGIN_S;
+  if (nowS < session.end) return session.start - OPEN_MARGIN_S;
+  const len = session.end - session.start;
   for (let k = 1; k <= 7; k++) {
     const at = session.start + k * DAY_S;
-    const weekday = new Date((at + session.gmtoffset) * 1000).getUTCDay();
-    if (weekday !== 0 && weekday !== 6 && at > nowS) return at - PROJECTED_MARGIN_S;
+    if (new Date((at + session.gmtoffset) * 1000).getUTCDay() === SATURDAY) continue;
+    if (nowS < at + len + PROJECTED_MARGIN_S) return at - PROJECTED_MARGIN_S;
   }
   return null;
 }
@@ -106,5 +119,6 @@ export function quoteFreshS(q, fetchedAtMs) {
   if (inSession || !Number.isFinite(q?.tradedAt) || t - q.tradedAt < RECENT_TRADE_S) return QUOTE_ACTIVE_S;
   const open = nextOpenS(s, t);
   if (open === null) return QUOTE_UNKNOWN_OPEN_S;
+  // An open already reached (a projected session under way) floors to active.
   return Math.max(QUOTE_ACTIVE_S, Math.min(QUOTE_IDLE_MAX_S, open - t));
 }

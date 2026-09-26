@@ -90,13 +90,16 @@ const LATE_START_S = 6 * 3600;
 // PRINT, this keeps a 'pre' game dated up to LATE_START_S ago: game two of a
 // doubleheader keeps its nominal time while game one runs long, and missing it
 // here would cache the finished game one's row for the idle maximum right up to
-// game two's first pitch.
+// game two's first pitch. An 'in' game counts as starting now, whatever its
+// date: the schedule can call game two live while the team endpoint still
+// shows game one's final, and that row must not idle through game two.
 export function nextStartAt(schedJson, nowMs = Date.now()) {
   let next = null;
   for (const e of schedJson?.events ?? []) {
     const c = e.competitions?.[0];
-    const at = epochS(e.date ?? c?.date);
-    if (c?.status?.type?.state !== 'pre' || at === null || at * 1000 <= nowMs - LATE_START_S * 1000) continue;
+    const state = c?.status?.type?.state;
+    const at = state === 'in' ? Math.floor(nowMs / 1000) : epochS(e.date ?? c?.date);
+    if ((state !== 'pre' && state !== 'in') || at === null || at * 1000 <= nowMs - LATE_START_S * 1000) continue;
     if (next === null || at < next) next = at;
   }
   return next;
@@ -151,17 +154,20 @@ export function mapTeamSummary(teamJson, lastLine, lg, liveComp = null, nextLine
 export const SPORTS_LIVE_S = 60;
 export const SPORTS_IDLE_MAX_S = 900;
 export const SPORTS_UNSURE_S = 180;
-// A pre-game row this close to its start is treated as live.
+// A game this close to its start is treated as live.
 const SOON_S = 20 * 60;
 // An idle row expires this long before the next start, so the refetch that
 // sees the game coming lands inside the SOON_S window, not after first pitch.
 const LEAD_S = 10 * 60;
 
-// Seconds an idle row may live, given when the next game starts: undefined is
-// "could not find out", null is "nothing scheduled".
+// Seconds a row may live, given when the next game starts: undefined is "could
+// not find out", null is "nothing scheduled". A game starting within SOON_S, or
+// started under LATE_START_S ago (a rain delay, a late start, a doubleheader's
+// game two while game one's final is still the row), is treated as live.
 function idleFreshS(nextAt, nowS) {
   if (nextAt === undefined) return SPORTS_UNSURE_S;
   if (nextAt === null) return SPORTS_IDLE_MAX_S;
+  if (nextAt - nowS <= SOON_S && nowS - nextAt < LATE_START_S) return SPORTS_LIVE_S;
   return Math.max(SPORTS_LIVE_S, Math.min(SPORTS_IDLE_MAX_S, nextAt - LEAD_S - nowS));
 }
 
@@ -169,10 +175,12 @@ function idleFreshS(nextAt, nowS) {
 //   in                                   -> SPORTS_LIVE_S
 //   pre, starting within SOON_S, or
 //     started under LATE_START_S ago     -> SPORTS_LIVE_S (rain delay, late start)
-//   pre, dated LATE_START_S+ ago         -> postponed: idle until the NEXT game
+//   pre, dated LATE_START_S+ ago         -> postponed: as post, on the NEXT game
 //   pre, further out                     -> idle until this game
 //   post, none                           -> idle until the next game (a
-//                                           doubleheader's second, say)
+//                                           doubleheader's second, say), or
+//                                           SPORTS_LIVE_S once it is within
+//                                           SOON_S or under way
 //   no row, unknown state or start       -> SPORTS_UNSURE_S
 export function teamFreshS(digest, nowMs = Date.now()) {
   const row = digest?.row;
@@ -183,9 +191,7 @@ export function teamFreshS(digest, nowMs = Date.now()) {
     case 'pre': {
       const at = row.startsAt;
       if (!Number.isFinite(at)) return SPORTS_UNSURE_S;
-      if (nowS - at >= LATE_START_S) return idleFreshS(row.nextStartsAt, nowS);
-      if (at - nowS <= SOON_S) return SPORTS_LIVE_S;
-      return idleFreshS(at, nowS);
+      return idleFreshS(nowS - at >= LATE_START_S ? row.nextStartsAt : at, nowS);
     }
     case 'post':
     case 'none':
