@@ -271,6 +271,28 @@ describe('markets card tap', () => {
     expect(overlay().querySelector('.expand__note').textContent).toBe(AS_OF);
   });
 
+  it('gives the wall the card\'s header rule, and no CLOSED labels on its tiles', () => {
+    const symbols = ['^DJI', '^IXIC', '^GSPC', 'AAPL', 'MSFT', 'NVDA'];
+    const withState = (vm, state) => ({
+      ...vm,
+      indices: vm.indices.map((ix, i) => ({ ...ix, ...state(i) })),
+    });
+    // Mixed: the note dates the oldest OPEN quote (+120), not the closed +0.
+    const mixed = withState(vmOf(symbols), (i) => ({ open: i !== 1, fetchedAt: STAMP_EPOCH + (i === 1 ? 0 : 120 + i) }));
+    const { card } = board(mixed, [4, 4]);
+    expect(card.querySelector('.index__closed')).not.toBeNull(); // the card marks its closed row
+    card.click();
+    expect(overlay().querySelector('.expand__note').textContent).toBe(`as of ${fmtClock(STAMP_EPOCH + 120)}`);
+    expect(overlay().textContent).not.toMatch(/closed/i);
+    closeExpand();
+
+    // All closed: the wall's note says so too.
+    const shut = withState(vmOf(symbols), () => ({ open: false, fetchedAt: STAMP_EPOCH }));
+    const again = board(shut, [3, 2]).card;
+    again.click();
+    expect(overlay().querySelector('.expand__note').textContent).toBe('Closed');
+  });
+
   it('is inert when nothing is hidden: no badge, no expansion', () => {
     const { card } = board(vmOf(['^DJI', '^IXIC', '^GSPC']), [4, 8]);
     expect(card.querySelector('.card__more')).toBeNull();

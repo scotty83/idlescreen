@@ -992,6 +992,92 @@ describe('markets freshness note', () => {
   });
 });
 
+// Closed markets. The worker says of each quote whether its market trades now
+// (`open`) and when that quote was fetched (`fetchedAt`); the header dates the
+// open quotes only, and a closed row in a list still partly trading says so
+// under its deltas.
+describe('markets closed-market treatment', () => {
+  const UPDATED = 1790000000;
+  const q = (symbol, extra = {}) => ({
+    symbol, name: symbol, price: 100, change: 1, changePct: 1, spark: [1, 2, 3], ...extra,
+  });
+  // Tuesday late morning in New York: London shut at 11:30, Tokyo overnight,
+  // Bitcoin never. The oldest OPEN fetch is BTC's, and the oldest fetch of all
+  // (Tokyo's) must not date the header.
+  const MIXED = [
+    q('^GSPC', { open: true, fetchedAt: UPDATED + 600 }),
+    q('^FTSE', { open: false, fetchedAt: UPDATED + 60 }),
+    q('BTC-USD', { open: true, fetchedAt: UPDATED + 480 }),
+    q('^N225', { open: false, fetchedAt: UPDATED }),
+  ];
+  const ALL_CLOSED = MIXED.map((ix) => ({ ...ix, open: false }));
+  const vmOf = (indices) => ({ updatedAt: UPDATED, stale: false, indices });
+  const mount = (indices, [w, h] = [4, 4]) => {
+    const card = mountCard(markets, { w, h });
+    markets.render(card.querySelector('.card__body'), vmOf(indices), CFG);
+    return card;
+  };
+  const noteOf = (card) => card.querySelector('.card__title .card__asof')?.textContent;
+  const labelled = (card) =>
+    [...card.querySelectorAll('.index')]
+      .filter((row) => row.querySelector('.index__closed'))
+      .map((row) => row.querySelector('.index__name').textContent);
+
+  it('dates the header from the oldest OPEN quote, not the oldest quote', () => {
+    const card = mount(MIXED);
+    expect(noteOf(card)).toBe(`as of ${fmtClock(UPDATED + 480)}`);
+    card.remove();
+  });
+
+  it('says "Closed" in the header when every quote is closed', () => {
+    const card = mount(ALL_CLOSED);
+    expect(noteOf(card)).toBe('Closed');
+    card.remove();
+  });
+
+  it('renders a payload without the new fields exactly as before: as of updatedAt, no labels', () => {
+    const legacy = MIXED.map(({ open, fetchedAt, ...rest }) => rest);
+    const card = mount(legacy);
+    expect(noteOf(card)).toBe(`as of ${fmtClock(UPDATED)}`);
+    expect(card.querySelector('.index__closed')).toBeNull();
+    expect(card.querySelector('.index--closed')).toBeNull();
+    // A quote missing only its fetchedAt falls back to updatedAt, too.
+    expect(markets.marketsNote(vmOf([q('A', { open: true }), q('B', { open: true, fetchedAt: UPDATED + 9 })])))
+      .toBe(`as of ${fmtClock(UPDATED)}`);
+    card.remove();
+  });
+
+  it('labels only the closed rows of a mixed list, flush in the percentage cell', () => {
+    // 3x3 shows three rows, so Tokyo falls behind the tap there.
+    for (const [w, h, want] of [[4, 4, ['^FTSE', '^N225']], [3, 3, ['^FTSE']], [4, 8, ['^FTSE', '^N225']]]) {
+      const card = mount(MIXED, [w, h]);
+      expect(labelled(card)).toEqual(want);
+      const label = card.querySelector('.index__closed');
+      expect(label.textContent).toBe('Closed');
+      expect(label.parentElement.classList.contains('delta__pct')).toBe(true);
+      expect(card.querySelectorAll('.index--closed')).toHaveLength(want.length);
+      card.remove();
+    }
+  });
+
+  it('puts no row labels on an all-closed list: the header says it once', () => {
+    const card = mount(ALL_CLOSED);
+    expect(card.querySelector('.index__closed')).toBeNull();
+    expect(card.querySelector('.index--closed')).toBeNull();
+    card.remove();
+  });
+
+  it('keeps the 2-row card to the header rule: no row labels', () => {
+    for (const w of [3, 4]) {
+      const card = mount(MIXED, [w, 2]);
+      expect(card.classList.contains('t-s')).toBe(true);
+      expect(noteOf(card)).toBe(`as of ${fmtClock(UPDATED + 480)}`);
+      expect(card.querySelector('.index__closed')).toBeNull();
+      card.remove();
+    }
+  });
+});
+
 // The regression test for the /markets cache bug. The Worker sorts its cache
 // key on purpose (AAPL,MSFT and MSFT,AAPL coalesce to one entry, ~20 Yahoo
 // subrequests saved per permutation) while fetchMarkets answers in REQUEST

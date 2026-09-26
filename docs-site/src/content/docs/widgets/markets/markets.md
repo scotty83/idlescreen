@@ -10,6 +10,25 @@ size and counts the rest in its corner.
 **Tap the card** for the full ticker wall — every symbol you follow on one
 screen.
 
+## When markets close
+
+The time in the card's header ("as of 11:41 AM") is when the card last got
+quotes for the markets that are open. Quotes from closed markets don't count
+toward it. A market reads as closed from about 15 minutes after its closing
+trade until its next open; crypto and other round-the-clock instruments count
+as open whenever they trade.
+
+When some of your tickers are closed and others are still trading, each
+closed one shows **CLOSED** under its change. At the card's shortest size,
+where each ticker sits on one line, there is no room for the label, and the
+header time is the only sign.
+
+When every ticker you follow is closed, as over a weekend, the header says
+**Closed** instead of a time and the rows carry no label.
+
+The ticker wall behind the tap uses the same header; its tiles are not
+labelled.
+
 ## Configure
 
 **Settings → Markets.** Add and remove tickers, up to 20 — index symbols
