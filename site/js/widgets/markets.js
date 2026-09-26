@@ -228,8 +228,11 @@ export function shelfCols(n) {
 // symbol nobody reads aloud) and carries ^SYM underneath; a stock leads with
 // its symbol and carries the company name. Sparklines take the compact
 // single-session form: a tile is small, and the two-day shape needs the card's
-// full width to read.
-function tile(ix) {
+// full width to read. A `closed` tile says CLOSED at the right end of its name
+// line, in the card's voice: the name gives up width to it (ellipsing first),
+// and the label's line-height (main.css) keeps the tile the height of its
+// neighbours.
+function tile(ix, closed = false) {
   const up = ix.change >= 0;
   const index = isIndexSymbol(ix.symbol);
   const lead = index ? ix.name : ix.symbol;
@@ -245,7 +248,9 @@ function tile(ix) {
       <span class="tile__chg delta--${dir}">${up ? '+' : '−'}${fmt.format(Math.abs(ix.change))}</span>
     </div>
     ${sparkSvg({ ...ix, twoDay: false }, 'spark tile__spark')}
-    <span class="tile__name">${escapeHtml(sub)}</span>
+    ${closed
+      ? `<div class="tile__foot"><span class="tile__name">${escapeHtml(sub)}</span><span class="tile__closed">Closed</span></div>`
+      : `<span class="tile__name">${escapeHtml(sub)}</span>`}
   </div>`;
 }
 
@@ -255,7 +260,13 @@ function tile(ix) {
 // no reserved space, no hairline), and an indices-only config yields the shelf
 // alone with no empty grid below it. When the shelf cannot be afforded at all
 // (see shelfFits), the wall drops it and shows one grid of everything.
+//
+// Closed tiles are marked on the card's rule, judged over the whole list: only
+// while it is still partly trading. With every quote closed the overlay's
+// header already says "Closed", once.
 export function tileWall(indices) {
+  const mixed = indices.some(isOpen) && indices.some((ix) => !isOpen(ix));
+  const tileOf = (ix) => tile(ix, mixed && !isOpen(ix));
   const leads = indices.filter((ix) => isIndexSymbol(ix.symbol));
   const banded = shelfFits(leads.length, indices.length - leads.length);
   const shelf = banded ? leads : [];
@@ -264,7 +275,7 @@ export function tileWall(indices) {
   const sCols = shelfCols(shelf.length);
   const shelfRows = shelf.length ? Math.ceil(shelf.length / sCols) : 0;
   if (shelf.length) {
-    bands.push(`<div class="wall__shelf"${gridStyle('--cols', sCols)}>${shelf.map(tile).join('')}</div>`);
+    bands.push(`<div class="wall__shelf"${gridStyle('--cols', sCols)}>${shelf.map(tileOf).join('')}</div>`);
   }
   if (shelf.length && rest.length) bands.push('<div class="wall__rule"></div>');
   if (rest.length) {
@@ -272,7 +283,7 @@ export function tileWall(indices) {
     // A six-across grid drops to the denser tile type (see main.css): the extra
     // column is only legible if the tile buys the width back.
     bands.push(
-      `<div class="wall__grid${gCols >= MAX_COLS ? ' wall__grid--dense' : ''}"${gridStyle('--cols', gCols)}>${rest.map(tile).join('')}</div>`,
+      `<div class="wall__grid${gCols >= MAX_COLS ? ' wall__grid--dense' : ''}"${gridStyle('--cols', gCols)}>${rest.map(tileOf).join('')}</div>`,
     );
   }
   // A lone shelf centers instead of stranding itself at the top edge.
@@ -376,8 +387,9 @@ export function render(el, vm, cfg) {
   // Rows here are not tappable, so the whole card is the target and the +N badge
   // is a passive signifier — the two must agree exactly: no badge, no expansion.
   // The closure captures THIS render's vm, so the overlay always shows what the
-  // card was showing when it was tapped, header note included. The wall's
-  // tiles carry no CLOSED label: that treatment is the card's alone.
+  // card was showing when it was tapped, header note included. The wall marks
+  // its own closed tiles (tileWall) whatever this card's size: every tile has
+  // a name line with room for the label, which the 2-row card's rows lack.
   setExpandSource(
     el,
     shown && hidden > 0

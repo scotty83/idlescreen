@@ -1694,6 +1694,22 @@ body.mode-ambient .gear--edit { display: none; }
    the numbers: more room means more curve, which is the point of the wall. */
 .wall__grid .tile__spark { flex: 1 1 36px; min-height: 36px; max-height: 90px; }
 .tile__name { font-size: 19px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* AA: dim, not faint */
+/* A closed tile in a list still partly trading (markets.js marks it): CLOSED
+   at the right end of the name line, in the card's .index__closed voice. The
+   name shrinks and ellipses first; the label never does. line-height 1 keeps
+   the label inside the name's own line box, so the tile's height is unchanged
+   and it stays level with its open neighbours. overflow:hidden lets the line
+   give up height the way a bare .tile__name does (its min-height drops to 0),
+   so a squeezed tile crops a closed tile's name line exactly as it crops an
+   open one's instead of overflowing past its neighbours' lines. */
+.tile__foot { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; overflow: hidden; }
+.tile__foot .tile__name { min-width: 0; }
+.tile__closed {
+  flex: none;
+  font-family: var(--font-board); font-size: 17px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; line-height: 1;
+  color: var(--ink-dim); white-space: nowrap;
+}
 /* Six across — a full 20-ticker wall under an index shelf — leaves a 279px tile
    instead of 339. The symbol keeps its size, because the symbol is what the
    wall is read by; the width comes back out of the padding and the secondary
@@ -1703,6 +1719,7 @@ body.mode-ambient .gear--edit { display: none; }
 .wall__grid--dense .tile__pct { font-size: 21px; }
 .wall__grid--dense .tile__chg { font-size: 19px; }
 .wall__grid--dense .tile__name { font-size: 17px; } /* AA: dim, not faint */
+.wall__grid--dense .tile__closed { font-size: 15px; }
 /* Shelf tiles: bigger, and led by the friendly name (an index symbol is config
    vocabulary, not reading vocabulary — it goes to the quiet sub-line). */
 .wall__shelf .tile { padding: 18px 24px 20px; gap: 8px; max-height: none; }
