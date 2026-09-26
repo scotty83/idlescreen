@@ -2,8 +2,8 @@
 // for ONE mapping rule: the beta origins mirror production. idlescreen.io and
 // unsleep.io serve the guide at their roots, so their beta twins do too (Sean caught it serving
 // the app there, which broke the symmetry). Every other request on every
-// domain passes straight through to the assets, so beta.unsleep.app,
-// beta.roomboard.app and beta.quadrille.io behave exactly as before.
+// domain passes straight through to the assets, so beta.idlescreen.app,
+// beta.unsleep.app and beta.roomboard.app behave exactly as before.
 //
 // Only "/" is routed through this script at all: wrangler.jsonc sets
 // run_worker_first to just the root path, so the whole site continues to be

@@ -19,16 +19,15 @@ main = "src/index.js"
 compatibility_date = "2026-06-01"
 routes = [
   { pattern = "api.roomboard.app", custom_domain = true },
-  # New-name alias (2026-08-07): pages served from *.quadrille.io target this
-  # host (see site/js/env.js). Auto-provisions DNS + cert on deploy. The old
-  # rvc.tech alias was retired the same day; if the dashboard still shows
-  # signage-api.rvc.tech attached, detach it there — removing a route from
-  # this file does not always deprovision an existing custom domain.
-  { pattern = "api.quadrille.io", custom_domain = true },
+  # Retired aliases: signage-api.rvc.tech (2026-08-07) and api.quadrille.io
+  # (2026-09-26, with the rest of the quadrille.io stack). Removing a route
+  # from this file does NOT detach its custom domain; a retired alias is
+  # detached by hand in the dashboard, after the deploy that drops its line
+  # (while the line is still listed, a deploy would re-attach it).
   # unsleep-origin alias (2026-08-18): pages served from *.unsleep.app or
   # *.unsleep.io target this host (see site/js/env.js). Like the others, a
-  # custom domain auto-provisions its DNS record and cert on deploy. The two
-  # older aliases stay: their URLs remain live.
+  # custom domain auto-provisions its DNS record and cert on deploy. The
+  # original api.roomboard.app stays: its URL remains live.
   { pattern = "api.unsleep.app", custom_domain = true },
   # idlescreen-origin alias (2026-08-20): pages served from *.idlescreen.app or
   # *.idlescreen.io target this host (see site/js/env.js). Same worker, fourth

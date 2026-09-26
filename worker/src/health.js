@@ -85,8 +85,8 @@ export const CHECKS = [
     // parses JSON and that file rides every front-door deploy.
     // Probed EXTERNALLY on purpose: DNS + TLS + routing are the failure modes
     // under test, which selfFetch would bypass. A check against ANY of this
-    // worker's own custom domains (api.roomboard.app, api.quadrille.io,
-    // api.unsleep.app, api.idlescreen.app) must NEVER be added here: the worker
+    // worker's own custom domains (api.roomboard.app, api.unsleep.app,
+    // api.idlescreen.app) must NEVER be added here: the worker
     // fetching its OWN custom domain gets a Cloudflare 522 every time, proven
     // live 2026-07-31 after one night of false paging, while the domain serves
     // perfectly from outside. (Replaced backup-site 2026-08-07 when rvc.tech was

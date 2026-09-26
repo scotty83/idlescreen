@@ -12,9 +12,9 @@ the day, Statista's chart of the day, and more). Hosted entirely on the
 public internet, personalized per device **without authentication**, with
 preferences that survive reboots and RoomOS upgrades.
 
-**idlescreen.io** is the site and **idlescreen.app** is the app. Every address
-the board has ever answered to keeps working, so one pointed at `unsleep.app`,
-`app.quadrille.io` or `roomboard.app` needs no attention.
+**idlescreen.io** is the site and **idlescreen.app** is the app. The earlier app
+addresses keep working, so a board pointed at `unsleep.app` or `roomboard.app`
+needs no attention.
 
 ![An idlescreen dashboard in the Momentum theme: weather, public-domain art, world clock, subway status, markets, quote of the day, and cloud-service status](docs/screenshots/dashboard-classic.png)
 
@@ -453,8 +453,8 @@ Two values are specific to this deployment and **must be changed in a fork**:
   export const WORKER_URL = 'https://signage-api.yourdomain.com';
   ```
 
-  (The shipped file routes to this project's own `api.roomboard.app` and
-  `api.quadrille.io`; a fork that keeps it would send every board's requests —
+  (The shipped file routes to this project's own `api.idlescreen.app`,
+  `api.unsleep.app` and `api.roomboard.app`; a fork that keeps it would send every board's requests —
   and the anonymous usage pings below — to the original operator's Worker.)
 - **`package.json` `deploy:site`** — the script hardcodes
   `--project-name signage`; replace it with your Pages project's name.
@@ -613,7 +613,7 @@ settings.
   heavier than it needs to be. If you are testing on a board, try re-setting
   the signage URL first and simplify the macro if that works.
 
-Leave the URL on `https://idlescreen.app` (the earlier `https://unsleep.app`, `https://app.quadrille.io` and `https://roomboard.app` keep working) for the welcome screen, or paste a
+Leave the URL on `https://idlescreen.app` (the earlier `https://unsleep.app` and `https://roomboard.app` keep working) for the welcome screen, or paste a
 board's own URL from `/setup` → "Get signage URL" to load a saved
 configuration. Pilot on one board first. Recommended extra per Cisco guidance:
 configure `Time OfficeHours` so signage runs ≤ 12 h/day.
