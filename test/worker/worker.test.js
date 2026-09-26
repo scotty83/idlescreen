@@ -21,7 +21,7 @@ import { mapMtaAlerts } from '../../worker/src/alerts.js';
 import { resetGraphToken, fetchServiceRows, serviceDigest, SVC_DEADLINE_MS, SERVICES } from '../../worker/src/svcstatus.js';
 import STATISTA from './fixtures/statista-cotd.html?raw';
 import yahooFx from '../fixtures/yahoo-gspc.json';
-import { mapYahooChart, quoteFreshS, nextOpenS, QUOTE_ACTIVE_S, QUOTE_IDLE_MAX_S, QUOTE_UNKNOWN_OPEN_S } from '../../worker/src/markets.js';
+import { mapYahooChart, quoteFreshS, quoteTrading, nextOpenS, QUOTE_ACTIVE_S, QUOTE_IDLE_MAX_S, QUOTE_UNKNOWN_OPEN_S } from '../../worker/src/markets.js';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} };
@@ -1592,7 +1592,8 @@ describe('/markets', () => {
     const calls = stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const res = await (await call('/markets?symbols=aaa,bbb')).json();
     expect(calls).toHaveLength(1); // BBB only
-    expect(res.indices[0]).toEqual(kept);
+    // The very quote the map held, plus the two fields assembly adds.
+    expect(res.indices[0]).toEqual({ ...kept, open: true, fetchedAt: Math.floor((t - 200_000) / 1000) });
     expect(res.indices[1]).toMatchObject({ symbol: 'BBB', price: 100 });
     // The card prints updatedAt as its "as of" clock: it must not claim the
     // 200s-old AAA quote is from now.
@@ -1613,7 +1614,7 @@ describe('/markets', () => {
     await seedQuotes({ AAA: { value: old, fetchedAt: t0 } });
     stubFetch([{ match: /chart\/BBB/, body: ySym('BBB') }]);
     const first = await call('/markets?symbols=aaa,bbb');
-    expect((await first.json()).indices[0]).toEqual(old); // reused, as it should be
+    expect((await first.json()).indices[0]).toMatchObject(old); // reused, as it should be
     expect(first.headers.get('cache-control')).toBe('public, max-age=1'); // what is left of AAA's 240s
     const entry = await caches.default.match(cacheKey('fresh', key));
     expect(Number(entry.headers.get('X-Fresh-Until'))).toBeLessThanOrEqual(t0 + 240_000 + 500); // rounding slop
@@ -1725,6 +1726,35 @@ describe('/markets', () => {
     expect(aloneAge).toBeLessThanOrEqual(1200);
     expect(aloneAge).toBeGreaterThan(1190);
     await clearCache('markets:AAA');
+  });
+
+  it('says of each quote whether its market trades now, and when that quote was fetched', async () => {
+    // AAA: a closed market's quote the map has held for ten minutes. BBB: fetched
+    // now from a market inside its session. CCC: fetched now with no trade time
+    // or session at all, which the freshness rule counts as trading.
+    const key = 'markets:AAA,BBB,CCC';
+    await clearCache(key);
+    const t0 = Date.now() - 600_000;
+    await seedQuotes({ AAA: { value: closedQuote('AAA', 600), fetchedAt: t0 } });
+    const nowS = Math.floor(Date.now() / 1000);
+    const bbb = ySym('BBB');
+    Object.assign(bbb.chart.result[0].meta, {
+      regularMarketTime: nowS - 30,
+      currentTradingPeriod: { regular: { start: nowS - 3600, end: nowS + 3600, gmtoffset: -14400 } },
+    });
+    stubFetch([{ match: /chart\/BBB/, body: bbb }, { match: /chart\/CCC/, body: ySym('CCC') }]);
+    const body = await (await call('/markets?symbols=aaa,bbb,ccc')).json();
+    const [aaa, bb, ccc] = body.indices;
+    expect(aaa).toMatchObject({ symbol: 'AAA', open: false, fetchedAt: Math.floor(t0 / 1000) }); // the map's own fetch time
+    expect(bb).toMatchObject({ symbol: 'BBB', open: true });
+    expect(ccc).toMatchObject({ symbol: 'CCC', open: true });
+    for (const q of [bb, ccc]) {
+      expect(q.fetchedAt).toBeGreaterThanOrEqual(nowS - 1);
+      expect(q.fetchedAt).toBeLessThanOrEqual(nowS + 1);
+    }
+    // The digest's own stamp is unchanged: still the oldest quote, closed or not.
+    expect(body.updatedAt).toBe(Math.floor(t0 / 1000));
+    await clearCache(key);
   });
 });
 
@@ -1876,6 +1906,29 @@ describe('quote freshness by trading activity', () => {
     expect(life(quote(null, null), '2026-09-26T12:00:00Z')).toBe(QUOTE_ACTIVE_S);
     expect(life(quote(null, at('2026-09-25T20:00:05Z')), '2026-09-26T12:00:00Z')).toBe(QUOTE_UNKNOWN_OPEN_S);
     expect(QUOTE_UNKNOWN_OPEN_S).toBe(900);
+  });
+
+  it('quoteTrading is the activity rule the freshness uses: in session, a recent trade, or no trade data', () => {
+    const open = (q, iso) => quoteTrading(q, at(iso));
+    expect(open(quote(NY_FRI, at('2026-09-25T15:00:00Z')), '2026-09-25T15:00:30Z')).toBe(true); // in session
+    expect(open(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:05:00Z')).toBe(true); // the closing auction
+    expect(open(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:30:00Z')).toBe(false); // settled: closed
+    expect(open(quote(NY_MON, FRI_CLOSE_PRINT), '2026-09-26T15:00:00Z')).toBe(false); // the weekend
+    expect(open({ symbol: 'OLD' }, '2026-09-26T12:00:00Z')).toBe(true); // no trade data
+    expect(open(quote(null, null), '2026-09-26T12:00:00Z')).toBe(true);
+    // Every verdict agrees with the life quoteFreshS gives at the same instant,
+    // except where the freshness rule leans fresh on its own: a projected
+    // session under way (Sunday's would-be New York hours) keeps a quote on the
+    // trading life without calling its market open.
+    for (const [q, iso] of [
+      [quote(NY_FRI, at('2026-09-25T15:00:00Z')), '2026-09-25T15:00:30Z'],
+      [quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-25T20:30:00Z'],
+      [{ symbol: 'OLD' }, '2026-09-26T12:00:00Z'],
+    ]) {
+      expect(open(q, iso)).toBe(life(q, iso) === QUOTE_ACTIVE_S);
+    }
+    expect(open(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-27T15:00:00Z')).toBe(false);
+    expect(life(quote(NY_FRI, FRI_CLOSE_PRINT), '2026-09-27T15:00:00Z')).toBe(QUOTE_ACTIVE_S);
   });
 });
 

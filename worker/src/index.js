@@ -2,7 +2,7 @@
 // and market indices (/markets). Everything responds with permissive CORS —
 // nothing served here is sensitive, and the boards fetch from a static origin.
 
-import { mapYahooChart, quoteFreshS, QUOTE_ACTIVE_S } from './markets.js';
+import { mapYahooChart, quoteFreshS, quoteTrading, QUOTE_ACTIVE_S } from './markets.js';
 import { sharedMapGet, freshForEarliest, earliestFreshUntil, FRESH_UNTIL_MS } from './sharedmap.js';
 import { getNjtSchedule, fetchNjtAlerts, nyDate } from './njt.js';
 import { fetchMtaAlerts } from './alerts.js';
@@ -429,14 +429,25 @@ async function fetchMarkets(origin, symbols) {
   }, { freshS: quoteFreshS, maxEntries: MARKETS_MAP_MAX });
   const held = symbols.filter((s) => quotes.has(s)).map((s) => quotes.get(s));
   if (!held.length) throw new Error('yahoo: all symbols failed');
-  const indices = held.map((q) => q.value);
+  // Each quote says whether its market is trading NOW (quoteTrading, the rule
+  // its freshness was judged by, asked at assembly) and when it was fetched
+  // (epoch seconds), so the card can date its clock from the open quotes alone
+  // and mark a closed one. A reused quote carries its own map fetch time.
+  const nowS = Date.now() / 1000;
+  const indices = held.map((q) => ({
+    ...q.value,
+    open: quoteTrading(q.value, nowS),
+    fetchedAt: Math.floor(q.fetchedAt / 1000),
+  }));
   // Mark an incomplete batch so cached() won't promote it over a complete 24h
   // stale backup (a later total outage should serve the full list, not this).
   const partial = indices.length < symbols.length;
-  // "as of" is the OLDEST quote's fetch time, not this assembly's: a watchlist
-  // built partly from the shared map can carry a quote fetched a whole quote
-  // life ago, and the card prints this stamp as its clock. How long cached()
-  // keeps the list fresh is a separate instant, its first quote's expiry.
+  // updatedAt is the OLDEST quote's fetch time, not this assembly's: a
+  // watchlist built partly from the shared map can carry a quote fetched a
+  // whole quote life ago. The card now dates its clock from the open quotes'
+  // own fetchedAt, and falls back to this stamp for a payload without them.
+  // How long cached() keeps the list fresh is a separate instant, its first
+  // quote's expiry.
   const updatedAt = Math.floor(Math.min(...held.map((q) => q.fetchedAt)) / 1000);
   return { updatedAt, indices, ...(partial && { partial: true }), [FRESH_UNTIL_MS]: earliestFreshUntil(held) };
 }

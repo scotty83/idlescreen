@@ -33,7 +33,8 @@ export function mapYahooChart(json, name) {
   // degrades to the 1-day view.
   const twoDay = prevCloses.length > 0 && today.length > 0;
   // When the market last traded and the regular session Yahoo calls current,
-  // for quoteFreshS; the card ignores both. Either may be null.
+  // for quoteTrading and quoteFreshS; the card reads neither, only the `open`
+  // fetchMarkets settles from them. Either may be null.
   const reg = meta.currentTradingPeriod?.regular;
   const session = Number.isFinite(reg?.start) && Number.isFinite(reg?.end)
     ? { start: reg.start, end: reg.end, gmtoffset: Number.isFinite(reg.gmtoffset) ? reg.gmtoffset : off }
@@ -110,14 +111,22 @@ export function nextOpenS(session, nowS) {
   return null;
 }
 
+// Whether a quote's market is trading at atS (epoch seconds): inside the
+// session Yahoo names, or a trade within RECENT_TRADE_S, or no trade time to
+// judge by at all. One rule for both readers: quoteFreshS asks it at the
+// quote's fetch, and fetchMarkets at assembly, for the `open` the card shows.
+export function quoteTrading(q, atS) {
+  const s = q?.session;
+  const inSession = Boolean(s) && s.start <= atS && atS < s.end;
+  return inSession || !Number.isFinite(q?.tradedAt) || atS - q.tradedAt < RECENT_TRADE_S;
+}
+
 // sharedMapGet's freshS for the quote map: (quote, fetchedAtMs) => seconds.
 // Judged at the quote's fetch, so its life is fixed from then on.
 export function quoteFreshS(q, fetchedAtMs) {
   const t = fetchedAtMs / 1000;
-  const s = q?.session;
-  const inSession = Boolean(s) && s.start <= t && t < s.end;
-  if (inSession || !Number.isFinite(q?.tradedAt) || t - q.tradedAt < RECENT_TRADE_S) return QUOTE_ACTIVE_S;
-  const open = nextOpenS(s, t);
+  if (quoteTrading(q, t)) return QUOTE_ACTIVE_S;
+  const open = nextOpenS(q.session, t);
   if (open === null) return QUOTE_UNKNOWN_OPEN_S;
   // An open already reached (a projected session under way) floors to active.
   return Math.max(QUOTE_ACTIVE_S, Math.min(QUOTE_IDLE_MAX_S, open - t));
