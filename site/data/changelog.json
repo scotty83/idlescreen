@@ -1,5 +1,14 @@
 [
   {
+    "date": "September 26",
+    "items": [
+      {
+        "lead": "Markets says when a market is closed",
+        "text": "The Markets card's \"as of\" time now covers only the markets that are open. When some of the tickers you follow are closed and others are trading, each closed one is marked CLOSED under its change, and when every one is closed, as over a weekend, the header says Closed instead of a time."
+      }
+    ]
+  },
+  {
     "date": "September 1",
     "items": [
       {
