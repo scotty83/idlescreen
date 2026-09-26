@@ -91,9 +91,9 @@ describe('widget health vector (Tier 2, exceptions only — backlog item 9)', ()
 describe('serving channel', () => {
   it('reads the deployment off the hostname', () => {
     expect(serveChannel({ hostname: 'roomboard.app' })).toBe('prod');
-    expect(serveChannel({ hostname: 'quadrille.io' })).toBe('prod');
+    expect(serveChannel({ hostname: 'idlescreen.app' })).toBe('prod');
     expect(serveChannel({ hostname: 'beta.roomboard.app' })).toBe('beta');
-    expect(serveChannel({ hostname: 'beta.quadrille.io' })).toBe('beta');
+    expect(serveChannel({ hostname: 'beta.idlescreen.app' })).toBe('beta');
     expect(serveChannel({ hostname: 'localhost' })).toBe('dev');
     expect(serveChannel({ hostname: '127.0.0.1' })).toBe('dev');
   });

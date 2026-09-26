@@ -19,8 +19,8 @@ jobs:
 
   deploy-site:
     # Publishes the site to the production Pages project (`signage`, which serves
-    # idlescreen.app, with unsleep.app, roomboard.app and app.quadrille.io
-    # still attached) after tests pass. Push-to-main only, skipped on PRs. Reuses
+    # idlescreen.app, with unsleep.app and roomboard.app still attached) after
+    # tests pass. Push-to-main only, skipped on PRs. Reuses
     # the same `deploy:site` the maintainer used to run by hand; stamp-version.js
     # stamps version.json with the commit SHA so boards self-refresh hourly.
     needs: test

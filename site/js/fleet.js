@@ -115,7 +115,7 @@ const medianMs = (xs) => {
 // Which deployment this board is actually served by, so the stats app can stop
 // GUESSING at beta rigs from version lineage (its documented fallback). Derived
 // from the hostname, which is the only honest source: beta.* is the dev channel
-// (beta.roomboard.app, beta.quadrille.io, beta.unsleep.io), loopback is a
+// (beta.idlescreen.app, beta.roomboard.app, beta.unsleep.io), loopback is a
 // laptop, everything else is production. No location at all (a test, an odd
 // embedding) reads 'prod' rather than inventing a third state.
 //

@@ -241,11 +241,13 @@ describe('/info wears the brand', () => {
   });
 
   it('carries no display mention of the retired names (URLs are a separate phase)', () => {
-    // Addresses are exempt: quadrille.io and unsleep.app still answer, and the
-    // lede says so on purpose. What must not survive is either retired name as
-    // the PRODUCT's name in a sentence.
-    const prose = html.replace(/https?:\/\/[^\s"'<>]+|>[^<]*(?:quadrille\.io|unsleep\.(?:app|io))[^<]*</gi, '');
-    expect(prose).not.toMatch(/quadrill/i);
+    // unsleep addresses are exempt: unsleep.app still answers, and the lede
+    // says so on purpose. What must not survive is the retired name as the
+    // PRODUCT's name in a sentence. quadrille gets no exemption at all: its
+    // hosts retired to redirects 2026-09-26, so the page may not name them
+    // even as addresses, and the whole file is checked, not the prose.
+    const prose = html.replace(/https?:\/\/[^\s"'<>]+|>[^<]*unsleep\.(?:app|io)[^<]*</gi, '');
+    expect(html).not.toMatch(/quadrill/i);
     expect(css).not.toMatch(/quadrill/i);
     expect(prose).not.toMatch(/unsleep/i);
     expect(css).not.toMatch(/unsleep/i);

@@ -1,20 +1,23 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "room-and-board-beta",
-  // The beta origins, all custom domains on this worker. The first two were
+  // The beta origins, all custom domains on this worker. The first was
   // attached by hand in the dashboard before this block existed; declaring
-  // them here makes the config match reality (a custom domain absent from
-  // config is NOT detached by a deploy, so listing them is documentation,
-  // not a change). The unsleep pair was added 2026-08-18 with the rename:
-  // both TLDs answer because the beta. prefix should work on whichever
-  // domain a person remembers. The origins MIRROR production's mapping:
+  // it here makes the config match reality (a custom domain absent from
+  // config is NOT detached by a deploy, so listing it is documentation,
+  // not a change). The same rule runs in reverse: beta.quadrille.io left
+  // this list 2026-09-26 with the rest of the quadrille.io stack, and
+  // dropping its line detaches nothing; it is detached by hand in the
+  // dashboard, after the deploy that drops the line (a deploy that still
+  // lists it would re-attach it). The unsleep pair was added 2026-08-18
+  // with the rename: both TLDs answer because the beta. prefix should work
+  // on whichever domain a person remembers. The origins MIRROR production's mapping:
   // beta.unsleep.io serves the guide at its root the way unsleep.io does
   // (beta-router.js does that one rewrite), the app origins serve the app.
   // NOTE: a NEW custom domain here provisions only from a LOCAL wrangler
   // deploy; the Workers-Builds token cannot create zone DNS records.
   "routes": [
     { "pattern": "beta.roomboard.app", "custom_domain": true },
-    { "pattern": "beta.quadrille.io", "custom_domain": true },
     { "pattern": "beta.unsleep.app", "custom_domain": true },
     { "pattern": "beta.unsleep.io", "custom_domain": true },
     { "pattern": "beta.idlescreen.app", "custom_domain": true },

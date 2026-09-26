@@ -617,21 +617,23 @@ export const RETIRED_AFTER = Object.freeze({});
 export const isRetired = (id, nowMs = Date.now(), table = RETIRED_AFTER) =>
   (table[id] ?? Infinity) < nowMs;
 
-// Staged rollout: ids listed here surface only on staging hosts (beta.
-// roomboard.app, beta.quadrille.io, the rvc.tech fallback, local dev) — prod
-// ships the code dark and the pickers/settings nav hide the id until launch.
+// Staged rollout: ids listed here surface only on staging hosts (the beta.
+// origins such as beta.idlescreen.app, local dev) — prod ships the code dark
+// and the pickers/settings nav hide the id until launch.
 // A card that is already PLACED still renders everywhere, so a beta-configured
 // board never breaks by visiting prod.
 const BETA_ONLY = Object.freeze(['iptv']);
 // The list is of PRODUCTION hosts, and everything else is staging by default.
-// app.quadrille.io and unsleep.app serve production alongside roomboard.app,
-// so none of them may count as a staging host; the beta hosts
-// (beta.roomboard.app, beta.quadrille.io) fall through to the default and stay
-// beta. A production domain missing from this list would quietly ship the
+// idlescreen.app, unsleep.app and roomboard.app all serve production, so none
+// of them may count as a staging host; the beta hosts (beta.idlescreen.app,
+// beta.roomboard.app, ...) fall through to the default and stay beta. A
+// production domain missing from this list would quietly ship the
 // BETA_ONLY cards to real boards, which is why the rename reconciliation of
-// 2026-08-18 added unsleep.app here the same day the domain went live.
+// 2026-08-18 added unsleep.app here the same day the domain went live. The
+// same rule decides when a host may leave: only once it serves no page at
+// all, as app.quadrille.io did 2026-09-26 when it became a redirect.
 export const isBetaHost = (host = (typeof location !== 'undefined' ? location.hostname : 'localhost')) =>
-  host !== 'roomboard.app' && host !== 'www.roomboard.app' && host !== 'app.quadrille.io' && host !== 'unsleep.app' &&
+  host !== 'roomboard.app' && host !== 'www.roomboard.app' && host !== 'unsleep.app' &&
   host !== 'idlescreen.app';
 export const isLaunched = (id, host) => !BETA_ONLY.includes(id) || isBetaHost(host);
 

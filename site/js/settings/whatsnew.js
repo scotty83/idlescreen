@@ -17,7 +17,7 @@ import { escapeHtml } from '../util.js';
 export const MIN_OPEN_GROUPS = 1;
 
 // Relative, so it resolves against the board's own origin whatever host it is
-// served from (roomboard.app, app.quadrille.io, beta., a preview deploy).
+// served from (idlescreen.app, roomboard.app, beta., a preview deploy).
 export const CHANGELOG_URL = 'data/changelog.json';
 
 // Same shape guard /info applies: a group needs a date and at least one item

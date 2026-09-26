@@ -165,10 +165,9 @@ describe('front-door check (the separate origin nobody would notice broken)', ()
     // custom_domain binding or not, while the domain serves perfectly from
     // outside. A check that can only measure Cloudflare's own-alias
     // restriction is worse than no check, so none of api.roomboard.app,
-    // api.quadrille.io or api.unsleep.app may ever appear in CHECKS.
+    // api.unsleep.app or api.idlescreen.app may ever appear in CHECKS.
     expect(byName['backup-api']).toBeUndefined();
     expect(CHECKS.some((c) => (c.url || '').includes('api.roomboard.app'))).toBe(false);
-    expect(CHECKS.some((c) => (c.url || '').includes('api.quadrille.io'))).toBe(false);
     expect(CHECKS.some((c) => (c.url || '').includes('api.unsleep.app'))).toBe(false);
     expect(CHECKS.some((c) => (c.url || '').includes('api.idlescreen.app'))).toBe(false);
   });
