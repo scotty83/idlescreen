@@ -1,0 +1,15 @@
+# The same file on every host: the app (idlescreen.app and its aliases) serves
+# it from site/, and tools/build-frontdoor.js ships it to idlescreen.io and
+# unsleep.io. Nothing is disallowed, on purpose. The pages that should stay out
+# of search say so with <meta name="robots" content="noindex">, and the copies
+# of the guide name idlescreen.io with a canonical link; a crawler has to fetch
+# a page to read either one, and a Disallow line here would stop it doing that.
+#
+# Two sitemaps because the docs build their own: /sitemap.xml lists the front
+# door's pages, and the docs' index lists the docs. A sitemap index lists
+# sitemaps, not other indexes, so the pointer to the docs' index lives here.
+User-agent: *
+Allow: /
+
+Sitemap: https://idlescreen.io/sitemap.xml
+Sitemap: https://idlescreen.io/docs/sitemap-index.xml

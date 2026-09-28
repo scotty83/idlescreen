@@ -49,6 +49,13 @@
      (touch-action) and js/zoomguard.js, which is where that reasoning lives. -->
 <meta name="viewport" content="width=1920, initial-scale=1, maximum-scale=1">
 <title>idlescreen</title>
+<!-- A board's dashboard is nothing a search result should land on: the page is
+     empty chrome until a config arrives, and what a stranger searching for
+     idlescreen wants is the guide at idlescreen.io. noindex rather than a
+     robots.txt Disallow, because a crawler has to FETCH a page to read this
+     tag; a disallowed URL can still be listed from links, just blind. The setup
+     pages and the audit harnesses carry the same line for the same reason. -->
+<meta name="robots" content="noindex">
 <!-- Warm the two hosts every board talks to before the module graph has even
      parsed: the API worker (transit, markets, news, …) and Open-Meteo, which
      the Weather card in the default layout fetches browser-direct. Both are
