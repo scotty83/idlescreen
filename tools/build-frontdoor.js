@@ -23,12 +23,19 @@
 // explicit list fails loudly in CI when a new dependency is added to
 // info.html without being shipped here — a silent partial copy would serve a
 // broken page with a green build.
-import { cpSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const out = resolve(repo, 'dist/frontdoor');
+// An optional output directory, for the tests (test/frontdoor.test.js builds
+// into a temp dir so it never clobbers a staged dist/). The directory is wiped
+// first, so anything that contains the repo is refused outright.
+const out = resolve(repo, process.argv[2] ?? 'dist/frontdoor');
+if (repo.startsWith(out)) {
+  console.error('front door refuses to build into a directory that holds the repo:', out);
+  process.exit(1);
+}
 
 const FILES = [
   // [source under site/, destination under dist/frontdoor/]
@@ -38,6 +45,9 @@ const FILES = [
   // origins — idlescreen.io/terms and idlescreen.app/terms are the same bytes. The
   // reference guard below is what enforces that it keeps being shipped.
   ['terms.html', 'terms.html'],
+  // The same bytes the app hosts serve: allow everything, name the sitemaps.
+  // sitemap.xml itself is not copied; it is written below from these pages.
+  ['robots.txt', 'robots.txt'],
   ['css/info.css', 'css/info.css'],
   ['js/info.js', 'js/info.js'],
   // info.js's only static import: the wordmark's power-tittle probe, shared
@@ -116,4 +126,37 @@ if (unshipped.length) {
   console.error('front door modules import files it does not ship:', unshipped);
   process.exit(1);
 }
-console.log(`front door assembled: ${FILES.length} files + assets/info -> ${out}`);
+
+// Every page names its home, and the sitemap is those homes. The same bytes
+// answer on idlescreen.io, unsleep.io and the app hosts, and with no declared
+// home Google indexed the oldest copy, so each shipped page carries a
+// canonical link into idlescreen.io that has to land on a page this build
+// ships (Pages serves /terms from terms.html and / from index.html). The
+// sitemap is the de-duplicated set of those links, which is why it cannot
+// drift from the pages: index.html and info.html are one page to a crawler and
+// one line here. No <lastmod>: this script copies files, and neither the build
+// time nor CI's one-commit shallow clone can say when a page last changed.
+const ORIGIN = 'https://idlescreen.io';
+const CANONICAL = /<link rel="canonical" href="([^"]*)">/;
+const pages = FILES.map(([, d]) => d).filter((d) => d.endsWith('.html'));
+const homes = [];
+const unhomed = [];
+for (const page of pages) {
+  const href = CANONICAL.exec(readFileSync(resolve(out, page), 'utf8'))?.[1];
+  const path = href?.startsWith(`${ORIGIN}/`) ? href.slice(ORIGIN.length) : '';
+  const file = path.endsWith('/') ? `${path.slice(1)}index.html` : `${path.slice(1)}.html`;
+  if (!path || !pages.includes(file)) unhomed.push(`${page} (canonical: ${href ?? 'none'})`);
+  else if (!homes.includes(href)) homes.push(href);
+}
+if (unhomed.length) {
+  console.error(`front door pages without a canonical ${ORIGIN} page it ships:`, unhomed);
+  process.exit(1);
+}
+writeFileSync(
+  resolve(out, 'sitemap.xml'),
+  '<?xml version="1.0" encoding="UTF-8"?>\n'
+    + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    + homes.map((u) => `  <url><loc>${u}</loc></url>\n`).join('')
+    + '</urlset>\n',
+);
+console.log(`front door assembled: ${FILES.length} files + assets/info + sitemap (${homes.length} pages) -> ${out}`);

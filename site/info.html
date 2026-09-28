@@ -11,6 +11,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>idlescreen · A dashboard for your idle screen</title>
 <meta name="description" content="Every widget card the idlescreen signage dashboard can show: commute, weather, markets, news, images, and the daily reads.">
+<!-- The one address search engines should list. These bytes answer at the root
+     of both front-door domains, at /info on both, and at /info on every app
+     host; with no home declared, Google indexed the oldest copy, on a retired
+     domain, and a search for the product found only that. So every copy names
+     the front door's root. Absolute, unlike every other link on the page,
+     because it has to name one origin from all of them. build-frontdoor.js
+     refuses to ship a page without one and builds the sitemap from these. -->
+<link rel="canonical" href="https://idlescreen.io/">
 <!-- The same icon trio the app shell wires: the scalable quad master, then
      PNG rasters for the slots that want pixels (iOS ignores an SVG
      apple-touch-icon and would fall back to a page screenshot). -->
