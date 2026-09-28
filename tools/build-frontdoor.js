@@ -23,18 +23,41 @@
 // explicit list fails loudly in CI when a new dependency is added to
 // info.html without being shipped here — a silent partial copy would serve a
 // broken page with a green build.
-import { cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { resolve, dirname, posix } from 'node:path';
+import { cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { resolve, dirname, basename, relative, isAbsolute, sep, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // An optional output directory, for the tests (test/frontdoor.test.js builds
 // into a temp dir so it never clobbers a staged dist/). The directory is wiped
-// first, so anything that contains the repo is refused outright.
+// before anything is copied, so only two kinds are accepted: the default
+// dist/frontdoor, and a directory wholly outside the repo that does not hold
+// it either. Everything else in the repo is source (`site`, `worker`, `.git`,
+// `.`), and a relative argument resolves against the repo, not the caller's
+// cwd, so a stray `site` would have wiped site/. The comparison is on path
+// segments, not string prefixes (/a/b is not inside /a/bc), and on real
+// paths: a symlink or a differently-cased spelling (macOS disks ignore case)
+// can name a repo directory without looking like one. A path that does not
+// exist yet is judged by its nearest existing ancestor.
 const out = resolve(repo, process.argv[2] ?? 'dist/frontdoor');
-if (repo.startsWith(out)) {
-  console.error('front door refuses to build into a directory that holds the repo:', out);
-  process.exit(1);
+const real = (p) => {
+  const rest = [];
+  while (!existsSync(p)) {
+    rest.unshift(basename(p));
+    p = dirname(p);
+  }
+  return resolve(realpathSync.native(p), ...rest);
+};
+const within = (dir, p) => {
+  const rel = relative(dir, p);
+  return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+};
+if (out !== resolve(repo, 'dist/frontdoor')) {
+  const [realRepo, realOut] = [real(repo), real(out)];
+  if (within(realRepo, realOut) || within(realOut, realRepo)) {
+    console.error('front door only builds into dist/frontdoor or a directory outside the repo, not:', out);
+    process.exit(1);
+  }
 }
 
 const FILES = [
