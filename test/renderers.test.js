@@ -137,7 +137,7 @@ const CASES = [
   // service names the thing that broke instead of repeating its state word.
   ['services', services, ['Zoom', 'Operational', 'Cloudflare', 'Minor',
     'Cloudflare Dashboard and API service issues', 'Microsoft Teams: service degradation']],
-  ['apod', apod, ['Messier 24', 'Chuck Ayoub']],
+  ['apod', apod, ['Messier 33', 'George Chatzifrantzis']],
 ];
 
 // The render half of the RETIRED_AFTER mechanism, kept under test with no

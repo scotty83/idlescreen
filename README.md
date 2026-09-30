@@ -937,6 +937,7 @@ checks in `worker/src/health.js`:
 | `path` | `/path/realtime` still carries its station map, every station with both `ToNY` and `ToNJ`. PATH runs 24/7, so a missing map means the RidePATH feed reshaped; the direction arrays themselves may be empty between trains |
 | `subway` | `/alerts/subway` returns an alerts array whose rows still carry a header. An empty array passes (a day with no alerts is good news). Stands in for the whole `/alerts/{subway,lirr,mnr}` family: one upstream, so three checks would page three times for one MTA outage |
 | `ferry` | `/ferry/departures` returns a trips array. Empty passes, since NYC Ferry has genuinely quiet hours, which leaves the stale window as the real watchdog for this route |
+| `apod` | `/apod` returns a titled photo whose URL is an https image on `assets.science.nasa.gov`, dated within the last few days. Its stale window is 2 h (the route's 1 h cache plus the usual hour), and the date catches a feed that froze while still answering 200. The image itself is not fetched. Added after APOD's move to science.nasa.gov went unnoticed |
 | `code` | the setup-code service answers at all. A broken CODES namespace, an exhausted quota or a KV outage is otherwise invisible until somebody stands at a board typing a code that will never work |
 
 The `m365` check earned its place: that row is the only one assembled from

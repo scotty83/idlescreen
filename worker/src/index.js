@@ -15,7 +15,7 @@ import { fetchSubstackPosts } from './posts.js';
 import { fetchIcloudAlbum } from './icloud.js';
 import { fetchGdriveAlbum } from './gdrive.js';
 import { fetchServiceRows, serviceDigest, mendServiceStatuses, SERVICES, SVC_DEADLINE_MS } from './svcstatus.js';
-import { fetchApod } from './apod.js';
+import { fetchApod, APOD_TTL_S } from './apod.js';
 import { fetchCitibike } from './citibike.js';
 import { fetchTfl } from './tfl.js';
 import { parseBeacon, beaconDataPoint, deviceModel, originHost, MAX_BODY as BEACON_MAX_BYTES } from './fleet.js';
@@ -752,7 +752,7 @@ const handlers = {
     if (path === '/apod' && request.method === 'GET') {
       // Single global daily image — one cache key, 1h TTL (APOD changes once a
       // day). Read from NASA's public RSS feed, so no key (see apod.js).
-      return cached(url.origin, 'apod', 3600, () => fetchApod(env));
+      return cached(url.origin, 'apod', APOD_TTL_S, () => fetchApod(env));
     }
 
     if (path === '/citibike/status' && request.method === 'GET') {

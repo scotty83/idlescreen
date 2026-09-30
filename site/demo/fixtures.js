@@ -459,10 +459,10 @@ export const DEMO_VMS = {
     url: 'https://cdn.statcdn.com/Infographic/images/normal/28730.jpeg',
     link: 'https://www.statista.com/chart/28730/how-voters-rate-the-economy/' }] },
   apod: { updatedAt: 1783000000, photo: {
-    url: 'https://apod.nasa.gov/apod/image/2607/M24_1088.jpg',
-    title: 'Messier 24: Sagittarius Star Cloud',
-    explanation: 'Unlike most entries in Charles Messier\'s famous catalog of deep sky objects, M24 is not a bright galaxy or star cluster but a rich star cloud toward the center of our Milky Way galaxy, a window into a spiral arm some 10,000 light-years away.',
-    credit: 'Chuck Ayoub', date: '2026-07-11' } },
+    url: 'https://assets.science.nasa.gov/dynamicimage/assets/science/cds/apod/apod/2026/september/m33m14_rasa3NM.jpg?w=1280',
+    title: 'Messier 33: The Triangulum Galaxy',
+    explanation: 'The small, northern constellation Triangulum harbors this magnificent face-on spiral galaxy, Messier 33. Its popular names include the Pinwheel Galaxy or just the Triangulum Galaxy. M33 is over 50,000 light-years in diameter, third largest in the Local Group of galaxies after the Andromeda Galaxy (M31), and our own Milky Way. About 3 million light-years from the Milky Way, M33 is itself thought to be a satellite of the Andromeda Galaxy and astronomers in these two galaxies would likely have spectacular views of each other\'s grand spiral star systems. As for the view from the Milky Way, this sharp telescopic image shows off M33\'s blue star clusters and pinkish star forming regions along the galaxy\'s loosely wound spiral arms. In fact, the cavernous NGC 604 is the brightest star forming region, seen here at about the 5 o\'clock position from the galaxy center. Like M31, M33\'s population of well-measured variable stars have helped make this nearby spiral a cosmic yardstick for establishing the distance scale of the Universe.',
+    credit: 'George Chatzifrantzis', date: '2026-09-18' } },
   services: {
     updatedAt: 1783000000,
     services: [
