@@ -79,5 +79,10 @@ export function mapApod(xml) {
 export async function fetchApod(_env) {
   const res = await fetch(FEED, { signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`apod ${res.status}`);
-  return mapApod(await res.text());
+  // A 200 that yields no picture (a maintenance page, a reshaped feed) is a
+  // failure, not an answer: throwing keeps cached() serving last-good instead
+  // of caching { photo: null } and overwriting the backup with it.
+  const digest = mapApod(await res.text());
+  if (!digest.photo) throw new Error('apod: no usable photo in feed');
+  return digest;
 }

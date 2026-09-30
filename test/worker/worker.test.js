@@ -3360,6 +3360,16 @@ describe('apod adapter', () => {
     await expect(fetchApod({})).rejects.toThrow('apod 503');
     expect(calls).toEqual(['https://science.nasa.gov/feed/apod-basic/', 'https://science.nasa.gov/feed/apod-basic/']);
   });
+  // Throwing (rather than returning { photo: null }) is what lets cached() keep
+  // serving last-good instead of caching the empty answer over the backup.
+  it('fetchApod throws when a 200 answer holds no usable photo', async () => {
+    stubFetch([
+      { match: /science\.nasa\.gov/, body: APOD_FEED, ctype: 'application/rss+xml', times: 1 },
+      { match: /science\.nasa\.gov/, body: '<html><title>Maintenance</title></html>', ctype: 'text/html' },
+    ]);
+    await expect(fetchApod({})).resolves.toBeTruthy();
+    await expect(fetchApod({})).rejects.toThrow('no usable photo');
+  });
   it('/apod route serves the digest and caches under "apod"', async () => {
     await clearCache('apod');
     stubFetch([{ match: /science\.nasa\.gov/, body: APOD_FEED, ctype: 'application/rss+xml' }]);
@@ -3501,7 +3511,7 @@ describe('every feed route carries the digest envelope', () => {
     ['/f1', 'f1', any({}), {}],
     ['/amtrak/departures', 'amtrak', any({}), {}],
     ['/chart', 'chart', any(STATISTA), {}],
-    ['/apod', 'apod', any('<rss><channel></channel></rss>'), {}],
+    ['/apod', 'apod', any(APOD_FEED), {}],
     ['/citibike/status?ids=4703', 'citibike:4703', any({}), {}],
     ['/tfl/status', 'tfl', any([]), {}],
     ['/gdrive/album?folder=testfolder123', 'gdrive:testfolder123', any({ files: [] }), { GDRIVE_KEY: 'k' }],
