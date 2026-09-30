@@ -751,7 +751,7 @@ const handlers = {
 
     if (path === '/apod' && request.method === 'GET') {
       // Single global daily image — one cache key, 1h TTL (APOD changes once a
-      // day). NASA_KEY set; DEMO_KEY is the in-code fallback inside fetchApod.
+      // day). Read from NASA's public RSS feed, so no key (see apod.js).
       return cached(url.origin, 'apod', 3600, () => fetchApod(env));
     }
 
