@@ -235,8 +235,11 @@ export const CHECKS = [
       let u;
       try { u = new URL(p.url); } catch { return false; }
       if (u.protocol !== 'https:' || u.hostname !== 'assets.science.nasa.gov' || !APOD_IMAGE_PATH.test(u.pathname)) return false;
-      const dated = Date.parse(p.date);
-      return Number.isFinite(dated) && Date.now() - dated < APOD_DATE_MAX_MS;
+      // An Eastern date read as UTC midnight never lies ahead of now, so a
+      // future date (a mistyped pubDate would win mapApod's newest-pick for
+      // good) is as wrong as an old one; a day of slack covers clock skew.
+      const age = Date.now() - Date.parse(p.date);
+      return Number.isFinite(age) && age > -86400 * 1000 && age < APOD_DATE_MAX_MS;
     },
   },
   {

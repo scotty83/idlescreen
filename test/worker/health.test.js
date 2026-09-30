@@ -183,6 +183,8 @@ describe('health CHECKS validators', () => {
     expect(byName.apod(photo({ date: daysAgo(1) }))).toBe(true);
     expect(byName.apod(photo({ date: daysAgo(3) }))).toBe(true);
     expect(byName.apod(photo({ date: daysAgo(5) }))).toBe(false);
+    expect(byName.apod(photo({ date: daysAgo(-2) }))).toBe(false); // future: a frozen newest-pick
+    expect(byName.apod(photo({ date: '2037-09-30' }))).toBe(false);
     expect(byName.apod(photo({ date: '' }))).toBe(false);
   });
 });
