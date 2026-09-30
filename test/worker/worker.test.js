@@ -3277,45 +3277,96 @@ describe('decodeBomJson (AWS UTF-16 quirk)', () => {
 });
 
 import { mapApod, fetchApod } from '../../worker/src/apod.js';
-import apodWindow from './fixtures/apod-window.json'; // 7 days, 2019-05-06 is video
+// Six real items from science.nasa.gov/feed/apod-basic/ (2026-09-30), newest
+// first, with the <description> copy and the embedded article page dropped
+// (except a stub of the first one's, which carries a decoy <title>).
+import APOD_FEED from './fixtures/apod-feed.xml?raw';
 
 describe('apod adapter', () => {
-  it('mapApod picks the newest image (array is date-ascending)', () => {
-    const d = mapApod(apodWindow);
-    expect(d.photo.date).toBe('2019-05-11');
-    expect(d.photo.url).toMatch(/^https?:/);
-    expect(d.photo.title.length).toBeGreaterThan(0);
-    expect(typeof d.photo.explanation).toBe('string');
+  const ITEMS = [...APOD_FEED.matchAll(/<item>[\s\S]*?<\/item>/g)].map((m) => m[0]);
+  const feed = (...items) => `<rss><channel>${items.join('')}</channel></rss>`;
+  const byTitle = (t) => ITEMS.find((it) => it.includes(`<title>${t}`));
+  const ARP78 = byTitle('Arp 78');
+
+  it('mapApod picks the newest item and maps it to the card contract', () => {
+    const d = mapApod(APOD_FEED);
+    expect(d.photo).toEqual({
+      url: 'https://assets.science.nasa.gov/dynamicimage/assets/science/cds/apod/apod/2026/october/NGC772_Robert_Eder.jpg?w=1280',
+      title: 'Arp 78: Peculiar Galaxy in Aries', // not the embedded page's "APOD: 2026 September 30 - ..."
+      explanation: expect.stringMatching(/^Peculiar spiral galaxy Arp 78 .* spiky foreground Milky Way stars\.$/),
+      credit: 'Robert Eder',
+      date: '2026-09-30',
+    });
   });
-  it('mapApod skips a trailing video day', () => {
-    const d = mapApod(apodWindow.slice(0, 2)); // [05-05 image, 05-06 video]
-    expect(d.photo.date).toBe('2019-05-05');
+  it('mapApod picks by pubDate, not feed order', () => {
+    expect(mapApod(feed(...[...ITEMS].reverse())).photo.date).toBe('2026-09-30');
   });
-  it('mapApod returns photo:null when the window is all videos', () => {
-    const d = mapApod([{ date: '2019-05-06', media_type: 'video', url: 'x' }]);
-    expect(d.photo).toBeNull();
+  it('mapApod decodes entities in the title and the hdurl', () => {
+    const d = mapApod(feed(byTitle('Webb')));
+    expect(d.photo.title).toBe("Webb's View of M64"); // Webb&#039;s
+    // w=3853&#038;h=4070&#038;fit=clip... -> the path at board width, no leftovers
+    expect(d.photo.url).toBe('https://assets.science.nasa.gov/dynamicimage/assets/science/cds/apod/apod/2026/september/M64_Webb.jpg?w=1280');
   });
-  it('mapApod trims the copyright credit', () => {
-    const d = mapApod([{ date: '1', media_type: 'image', url: 'u', title: 't', copyright: '  Jane Doe\n' }]);
-    expect(d.photo.credit).toBe('Jane Doe');
+  it('mapApod never asks for more than the native width', () => {
+    // NASA's resizer upscales: a 960-wide original must not be asked for 1280.
+    expect(mapApod(feed(byTitle('Cosmic Latte'))).photo.url).toMatch(/CosmicLatte_jhu_960_annotated\.jpg\?w=960$/);
+    // w=0 is NASA's "size unknown": fall back to the board width.
+    expect(mapApod(feed(byTitle('A Plane Lunar'))).photo.url).toMatch(/PlaneEclipse_Ferreira_1059\.jpg\?w=1280$/);
   });
-  it('fetchApod retries with yesterday on a 400 (today not posted yet)', async () => {
-    const img = [{ date: '2019-05-05', media_type: 'image', url: 'u', title: 't' }];
-    const spy = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response('no data', { status: 400 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(img), { status: 200 }));
-    const d = await fetchApod({ NASA_KEY: 'K' });
-    expect(spy).toHaveBeenCalledTimes(2);
-    expect(d.photo.date).toBe('2019-05-05');
-    spy.mockRestore();
+  it('mapApod serves a video day by its still', () => {
+    const d = mapApod(feed(byTitle('Chasing')));
+    expect(d.photo.url).toMatch(/Totality_H264_Abridged\.jpg\?w=1280$/);
+    expect(d.photo.title).toBe("Chasing the Moon's Shadow");
+  });
+  it('mapApod strips credit markup, decodes it, and drops an "Image Credit:" label', () => {
+    expect(mapApod(feed(byTitle('Cosmic Latte'))).photo.credit).toBe('Karl Glazebrook & Ivan Baldry (JHU)');
+    expect(mapApod(feed(byTitle('Nā'))).photo.credit).toMatch(/^International Gemini Observatory \/ NOIRLab\/NSF\/AURA /);
+  });
+  it('mapApod falls back to the copyright, then to an empty credit', () => {
+    const noCredit = ARP78.replace(/<apod:credit>[\s\S]*?<\/apod:credit>/, '');
+    expect(mapApod(feed(noCredit)).photo.credit).toBe('Robert Eder');
+    const neither = noCredit.replace(/<apod:copyright>[\s\S]*?<\/apod:copyright>/, '');
+    expect(mapApod(feed(neither)).photo.credit).toBe('');
+  });
+  it("mapApod keeps the explanation paragraph, without its label or NASA's notices", () => {
+    const { explanation } = mapApod(feed(ARP78)).photo;
+    expect(explanation).not.toMatch(/Explanation|APOD's email|Tomorrow's picture|<|&#/);
+    expect(explanation).toContain("Arp 78's overdeveloped spiral arm"); // one space, no tags
+  });
+  it('mapApod skips an item whose hdurl is not an image', () => {
+    const article = ARP78.replace(/<apod:hdurl>[^<]*/, '<apod:hdurl>https://science.nasa.gov/image-article/apod-2026-september-30/');
+    const missing = ARP78.replace(/<apod:hdurl>[^<]*<\/apod:hdurl>/, '');
+    const next = byTitle('Cosmic Latte');
+    expect(mapApod(feed(article, next)).photo.date).toBe('2026-09-28');
+    expect(mapApod(feed(missing, next)).photo.date).toBe('2026-09-28');
+    expect(mapApod(feed(article)).photo).toBeNull();
+  });
+  it('mapApod dates the photo by the US Eastern day', () => {
+    // 03:00 UTC on Oct 1 is 23:00 EDT on Sep 30.
+    const late = ARP78.replace(/<pubDate>[^<]*/, '<pubDate>Thu, 01 Oct 2026 03:00:00 +0000');
+    expect(mapApod(feed(late)).photo.date).toBe('2026-09-30');
+  });
+  it('mapApod returns photo:null for an empty or unusable feed', () => {
+    for (const bad of ['', undefined, null, 'not xml', '<html><title>Error</title></html>', feed(), '[]']) {
+      expect(mapApod(bad)).toEqual({ photo: null });
+    }
+  });
+  it('fetchApod reads the science.nasa.gov feed and throws on a non-OK answer', async () => {
+    const calls = stubFetch([
+      { match: /science\.nasa\.gov\/feed\/apod-basic\//, body: APOD_FEED, ctype: 'application/rss+xml' },
+      { match: /science\.nasa\.gov/, status: 503, body: 'down' },
+    ]);
+    expect((await fetchApod({})).photo.date).toBe('2026-09-30');
+    await expect(fetchApod({})).rejects.toThrow('apod 503');
+    expect(calls).toEqual(['https://science.nasa.gov/feed/apod-basic/', 'https://science.nasa.gov/feed/apod-basic/']);
   });
   it('/apod route serves the digest and caches under "apod"', async () => {
     await clearCache('apod');
-    stubFetch([{ match: /api\.nasa\.gov/, body: apodWindow }]);
+    stubFetch([{ match: /science\.nasa\.gov/, body: APOD_FEED, ctype: 'application/rss+xml' }]);
     const res = await call('/apod');
     expect(res.status).toBe(200);
     const digest = await res.json();
-    expect(digest.photo.date).toBe('2019-05-11');
+    expect(digest.photo.date).toBe('2026-09-30');
     await clearCache('apod');
   });
 });
@@ -3450,7 +3501,7 @@ describe('every feed route carries the digest envelope', () => {
     ['/f1', 'f1', any({}), {}],
     ['/amtrak/departures', 'amtrak', any({}), {}],
     ['/chart', 'chart', any(STATISTA), {}],
-    ['/apod', 'apod', any([]), {}],
+    ['/apod', 'apod', any('<rss><channel></channel></rss>'), {}],
     ['/citibike/status?ids=4703', 'citibike:4703', any({}), {}],
     ['/tfl/status', 'tfl', any([]), {}],
     ['/gdrive/album?folder=testfolder123', 'gdrive:testfolder123', any({ files: [] }), { GDRIVE_KEY: 'k' }],
