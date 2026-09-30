@@ -20,7 +20,18 @@
 // Self-hosters: change the hosts/paths (or delete the [triggers] block in
 // wrangler.toml to turn the cron off).
 
+import { APOD_TTL_S } from './apod.js';
+
 const STALE_MAX = 3600; // 1h: past this, stale cache means the upstream is really down
+
+// The NASA photo's own clock (see the apod check). NASA posts one picture per
+// Eastern day, so a healthy newest photo is dated today, or yesterday until the
+// new post lands (usually just after midnight Eastern, sometimes hours later)
+// and the route's hour of cache turns over. Four days from the photo's date
+// (read as UTC midnight) is three missed posts in a row: past any late post,
+// and well past the one-day-and-change a healthy feed reaches.
+const APOD_DATE_MAX_MS = 4 * 86400 * 1000;
+const APOD_IMAGE_PATH = /\.(?:jpe?g|png|gif|webp)$/i;
 
 export const CHECKS = [
   {
@@ -191,6 +202,42 @@ export const CHECKS = [
     path: '/ferry/departures',
     maxStaleSec: STALE_MAX,
     ok: (j) => Array.isArray(j.trips),
+  },
+  {
+    // NASA Daily Photo. Added the day after APOD moved to science.nasa.gov
+    // (2026-09-29): the old API went dark, the route was left with only its
+    // day-old backup and then an error, and nothing paged because nothing
+    // watched it.
+    // The content asserted is the card's whole contract: a titled photo whose
+    // url is an https image on NASA's resizer host, assets.science.nasa.gov (a
+    // move off that host is the next site move, worth a page). The image itself
+    // is NOT fetched: that would be one more subrequest in a cron whose cold
+    // run already spends at or past the Free plan's 50, and no other check
+    // fetches assets either.
+    //
+    // Two clocks, because a feed can die two ways. maxStaleSec catches the loud
+    // way (the feed erroring while cached() serves last-good): a healthy answer
+    // is up to APOD_TTL_S (1h) old by design, since the route caches that long,
+    // so STALE_MAX alone would page on the very first failed refresh. The TTL
+    // plus the usual STALE_MAX grace is 2h, which is harmless for a picture that
+    // changes once a day and still pages ~22h before the 24h backup runs out
+    // and the card falls to "NASA photo unavailable". The photo's date catches the quiet way: a feed
+    // that keeps answering 200 with the same last item is re-stamped fresh on
+    // every refresh, so its age never moves; only the photo's own date shows it
+    // froze (the njt check's prior-day timetable, and the ferry feed's frozen
+    // clock, are the same failure on other routes).
+    name: 'apod',
+    path: '/apod',
+    maxStaleSec: APOD_TTL_S + STALE_MAX,
+    ok: (j) => {
+      const p = j.photo;
+      if (!p || typeof p.title !== 'string' || !p.title) return false;
+      let u;
+      try { u = new URL(p.url); } catch { return false; }
+      if (u.protocol !== 'https:' || u.hostname !== 'assets.science.nasa.gov' || !APOD_IMAGE_PATH.test(u.pathname)) return false;
+      const dated = Date.parse(p.date);
+      return Number.isFinite(dated) && Date.now() - dated < APOD_DATE_MAX_MS;
+    },
   },
   {
     // The setup-code service is the one dependency with no route worth probing:

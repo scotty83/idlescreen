@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { CHECKS, runHealthChecks, notify, alertPlan, nextFailingState, heartbeat } from '../../worker/src/health.js';
 import { QUOTE_IDLE_MAX_S } from '../../worker/src/markets.js';
 import { SPORTS_IDLE_MAX_S } from '../../worker/src/sports.js';
+import { APOD_TTL_S } from '../../worker/src/apod.js';
 
 // Valid response bodies keyed by a unique substring of each check's URL, so a
 // mock fetch can answer every probe with a shape its validator accepts. The
@@ -31,6 +32,18 @@ const OK_BODIES = {
   },
   '/alerts/subway': { ...STAMP(), alerts: [{ routes: ['4', '5', '6'], stops: [], kind: 'service', header: 'Downtown 4 trains run express', body: 'Track work.' }] },
   '/ferry/departures': { ...STAMP(), trips: [] }, // quiet midday board, live-observed
+  // mapApod's output for the 2026-09-18 feed item, dated today so the photo's
+  // own clock reads current.
+  '/apod': {
+    ...STAMP(),
+    photo: {
+      url: 'https://assets.science.nasa.gov/dynamicimage/assets/science/cds/apod/apod/2026/september/m33m14_rasa3NM.jpg?w=1280',
+      title: 'Messier 33: The Triangulum Galaxy',
+      explanation: 'The small, northern constellation Triangulum harbors this magnificent face-on spiral galaxy, Messier 33.',
+      credit: 'George Chatzifrantzis',
+      date: new Date().toISOString().slice(0, 10),
+    },
+  },
 };
 const bodyFor = (url) => OK_BODIES[Object.keys(OK_BODIES).find((k) => url.includes(k))];
 
@@ -150,6 +163,27 @@ describe('health CHECKS validators', () => {
     expect(byName.ferry({ trips: [{ tripId: '1', stops: [] }] })).toBe(true);
     expect(byName.ferry({ trips: {} })).toBe(false);
     expect(byName.ferry({})).toBe(false);
+  });
+  it('apod: a titled, current https image on NASA\'s resizer host', () => {
+    const live = OK_BODIES['/apod'];
+    const photo = (over) => ({ photo: { ...live.photo, ...over } });
+    const daysAgo = (n) => new Date(Date.now() - n * 86400 * 1000).toISOString().slice(0, 10);
+    expect(byName.apod(live)).toBe(true);
+    expect(byName.apod(photo({ url: live.photo.url.replace('.jpg', '.png') }))).toBe(true);
+    expect(byName.apod({ photo: null })).toBe(false); // the feed yielded nothing usable
+    expect(byName.apod({})).toBe(false);
+    expect(byName.apod(photo({ title: '' }))).toBe(false);
+    // The retired host, plain http, a page rather than an image, garbage.
+    expect(byName.apod(photo({ url: 'https://apod.nasa.gov/apod/image/2607/M24_1088.jpg' }))).toBe(false);
+    expect(byName.apod(photo({ url: live.photo.url.replace('https:', 'http:') }))).toBe(false);
+    expect(byName.apod(photo({ url: 'https://assets.science.nasa.gov/image-article/apod-2026-september-18/' }))).toBe(false);
+    expect(byName.apod(photo({ url: 'not a url' }))).toBe(false);
+    // The photo's own clock: yesterday's (just after midnight Eastern) and a
+    // late post pass; three missed posts in a row is a frozen feed.
+    expect(byName.apod(photo({ date: daysAgo(1) }))).toBe(true);
+    expect(byName.apod(photo({ date: daysAgo(3) }))).toBe(true);
+    expect(byName.apod(photo({ date: daysAgo(5) }))).toBe(false);
+    expect(byName.apod(photo({ date: '' }))).toBe(false);
   });
 });
 
@@ -294,12 +328,12 @@ describe('runHealthChecks', () => {
     expect(report.results).toHaveLength(CHECKS.length);
     expect(report.results.every((r) => r.ok)).toBe(true);
   });
-  it('carries all 15 checks, each under a distinct name', () => {
+  it('carries all 17 checks, each under a distinct name', () => {
     // A hard count on purpose: toHaveLength(CHECKS.length) above is circular and
-    // would happily pass with a check silently deleted. 13 → 15 on 2026-08-20,
-    // when the idlescreen aliases were added.
-    expect(CHECKS).toHaveLength(16);
-    expect(new Set(CHECKS.map((c) => c.name)).size).toBe(16);
+    // would happily pass with a check silently deleted. 13 → 16 on 2026-08-21
+    // (site-unsleep and the two idlescreen aliases), 17 on 2026-09-30 (apod).
+    expect(CHECKS).toHaveLength(17);
+    expect(new Set(CHECKS.map((c) => c.name)).size).toBe(17);
   });
   it('flags a non-200 with its status', async () => {
     const report = await run({ '/markets': { status: 503 } });
@@ -419,6 +453,68 @@ describe('stale-age on the three routes that could serve day-old cache unwatched
     expect(r.ok).toBe(false);
     expect(r.detail).toMatch(/stale \d+ min old/);
     expect(r.stale).toBe(false); // truthful: the worker never flagged it stale, the age threshold did
+  });
+});
+
+describe('apod (the NASA photo nothing watched through the 2026-09-29 site move)', () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const run = (overrides = {}) => {
+    const m = mockFetch(overrides);
+    return runHealthChecks(okEnv(), m, m);
+  };
+  const apod = (report) => report.results.find((r) => r.name === 'apod');
+  const body = (over) => JSON.stringify({ ...OK_BODIES['/apod'], ...over });
+
+  it('probes its own route in-process (path, not url), never the image itself', () => {
+    const check = CHECKS.find((c) => c.name === 'apod');
+    expect(check.path).toBe('/apod');
+    expect(check.url).toBeUndefined();
+  });
+
+  it('passes on a current photo, alongside everything else', async () => {
+    const report = await run();
+    expect(apod(report)).toMatchObject({ ok: true, detail: 'ok' });
+    expect(report.ok).toBe(true);
+  });
+
+  it('FAILS on photo:null, even from a 200 with a fresh stamp', async () => {
+    const report = await run({ '/apod': { body: body({ photo: null }) } });
+    expect(apod(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    expect(report.ok).toBe(false);
+  });
+
+  it('FAILS on the route\'s 502 (feed down and no backup left)', async () => {
+    const report = await run({ '/apod': { status: 502, body: JSON.stringify({ error: 'upstream_failed', detail: 'apod 503' }) } });
+    expect(apod(report)).toMatchObject({ ok: false, detail: 'HTTP 502' });
+  });
+
+  it('FAILS on last-good served past its 2h window (the 1h TTL plus the usual hour)', async () => {
+    const report = await run({ '/apod': { body: body({ stale: true, updatedAt: nowSec() - 3 * 3600 }) } });
+    expect(apod(report)).toMatchObject({ ok: false, detail: 'stale 180 min old', stale: true });
+    expect(report.ok).toBe(false);
+  });
+
+  it('tolerates last-good inside the window, even past the plain 1h STALE_MAX', async () => {
+    // A failed refresh serves a copy already up to an hour old (the TTL), so a
+    // 1h window would page on the first blip; 90 min must still read green.
+    const report = await run({ '/apod': { body: body({ stale: true, updatedAt: nowSec() - 90 * 60 }) } });
+    expect(apod(report)).toMatchObject({ ok: true, detail: 'ok (stale 90 min)', stale: true });
+    const maxStale = CHECKS.find((c) => c.name === 'apod').maxStaleSec;
+    expect(APOD_TTL_S * 1.5).toBeLessThan(maxStale); // every fresh answer lives the full TTL
+  });
+
+  it('FAILS on a frozen feed: fresh stamp, stale:false, but a photo five days old', async () => {
+    // cached() re-stamps each refresh, so a feed stuck on its last item never
+    // ages; only the photo's own date shows the freeze.
+    const old = new Date(Date.now() - 5 * 86400 * 1000).toISOString().slice(0, 10);
+    const report = await run({ '/apod': { body: body({ photo: { ...OK_BODIES['/apod'].photo, date: old } }) } });
+    expect(apod(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+  });
+
+  it('FAILS on a photo still pointing at the retired apod.nasa.gov host', async () => {
+    const photo = { ...OK_BODIES['/apod'].photo, url: 'https://apod.nasa.gov/apod/image/2607/M24_1088.jpg' };
+    const report = await run({ '/apod': { body: body({ photo }) } });
+    expect(apod(report).ok).toBe(false);
   });
 });
 

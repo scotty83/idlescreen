@@ -9,6 +9,11 @@ import { htmlToText } from './htmltext.js';
 
 const FEED = 'https://science.nasa.gov/feed/apod-basic/';
 
+// How long one read of the feed serves: the /apod route's cache TTL, and so the
+// oldest a healthy answer gets (the health check's age window builds on it).
+// The picture changes once a day; an hour bounds how late a board sees it.
+export const APOD_TTL_S = 3600;
+
 // NASA's resizer upscales past the native size, so ask for at most this width
 // and never more than the image actually has (the hdurl's own ?w=).
 const MAX_W = 1280;

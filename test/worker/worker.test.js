@@ -3762,6 +3762,11 @@ describe('the health alert state lives in KV, because the Cache API is colo-loca
     ['path', { stations: { NWK: { ToNY: [], ToNJ: [] } } }],
     ['alerts:subway', { alerts: [] }],
     ['ferry', { trips: [] }],
+    ['apod', { photo: {
+      url: 'https://assets.science.nasa.gov/dynamicimage/assets/science/cds/apod/apod/2026/september/m33m14_rasa3NM.jpg?w=1280',
+      title: 'Messier 33: The Triangulum Galaxy',
+      date: new Date().toISOString().slice(0, 10), // the check reads the photo's own clock
+    } }],
   ];
   const feedKey = (key) => new Request(`${SELF_ORIGIN}/__cache/fresh/${encodeURIComponent(key)}`);
   const seedGreenFeeds = () => Promise.all(GREEN_FEEDS.map(([key, body]) => caches.default.put(
