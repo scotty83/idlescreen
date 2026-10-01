@@ -1635,6 +1635,8 @@ function renderWorldclock() {
   });
 }
 
+// Open-Meteo's data is CC BY 4.0, so the credit sits where the location that
+// drives all three of its cards is chosen (the docs weather page carries it too).
 function renderWeather() {
   let query = '';
   let results = [];
@@ -1657,7 +1659,8 @@ function renderWeather() {
         .join('')}</div>
       ${qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [' ', '-'],
         '<button class="key osk__key" data-key="⌫">⌫</button><button class="key osk__key osk__key--primary osk__key--wide" data-key="Search">Search</button>')}
-      <p class="code__status${searching ? ' code__status--busy' : ''}">${escapeHtml(status)}</p>`;
+      <p class="code__status${searching ? ' code__status--busy' : ''}">${escapeHtml(status)}</p>
+      <p class="pane__hint">Weather, Air &amp; Sky and Surf data by Open-Meteo.com (CC BY 4.0).</p>`;
     pane().querySelectorAll('[data-units]').forEach((btn) =>
       btn.addEventListener('click', () => {
         state.cfg.loc = { ...state.cfg.loc, units: btn.dataset.units };

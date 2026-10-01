@@ -19,3 +19,9 @@ and the °F/°C toggle overrides it.
 One location drives all three weather cards — this one,
 [Air & Sky](/docs/widgets/weather-air/air-and-sky/) and
 [Surf](/docs/widgets/weather-air/surf/).
+
+## Data source
+
+Weather, Air & Sky and Surf data come from
+[Open-Meteo](https://open-meteo.com/), licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

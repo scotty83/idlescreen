@@ -1144,6 +1144,16 @@ describe('destructive buttons arm visibly', () => {
   });
 });
 
+describe('the Weather pane credits Open-Meteo', () => {
+  afterEach(() => closeSettings());
+  it('names the source and its license under the keypad (CC BY 4.0 requires it)', async () => {
+    document.body.innerHTML = '<div id="settings-root"></div>';
+    await openSettings(normalizeConfig({}), { focus: 'weather' });
+    const credit = document.querySelector('.settings__pane .code__status + .pane__hint');
+    expect(credit?.textContent).toBe('Weather, Air & Sky and Surf data by Open-Meteo.com (CC BY 4.0).');
+  });
+});
+
 describe('the keypad status line has three registers, not one', () => {
   const settle = () => new Promise((r) => setTimeout(r, 30));
   const status = () => document.querySelector('.settings__pane .code__status');
