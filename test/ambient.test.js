@@ -2,8 +2,13 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createSlideshow, swipeFadeThrough, SWIPE_OUT_MS } from '../site/js/imageshow.js';
-import { stripData, stripHtml } from '../site/js/ambient.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  createSlideshow, swipeFadeThrough, SWIPE_OUT_MS, captionPlacement,
+  CAPTION_LEFT, CAPTION_BOTTOM, CAPTION_BAR_BOTTOM, CAPTION_BAR_MIN,
+} from '../site/js/imageshow.js';
+import { stripData, stripHtml, setStripSourceStale, isStripSourceStale, onStripStaleChange } from '../site/js/ambient.js';
 import { ambientSource } from '../site/js/modes.js';
 import { resolvePhotosManifest } from '../site/js/photos-manifest.js';
 import { DEMO_VMS, DEMO_NOW_MS } from '../site/demo/fixtures.js';
@@ -523,5 +528,214 @@ describe('stripData temperature units', () => {
     expect(stripData(caches, { widgets: ['weather'], loc: { units: 'C' } }).temp).toBe(29);
     expect(stripData(caches, { widgets: ['weather'], loc: { units: 'F' } }).temp).toBe(84);
     expect(stripData(caches, { widgets: ['weather'] }).temp).toBe(84); // no loc → F default
+  });
+});
+
+// Sean's pick C (2026-11-13): a source the dashboard holds stale leaves the
+// strip, rather than showing an old number the card would have dimmed and
+// stamped. The registry is module state, so every test leaves it empty.
+describe('stripData drops stale sources', () => {
+  const NOW = 1_800_000_000;
+  const caches = {
+    weather: { now: { temp: 84, label: 'Mostly clear' } },
+    lirr: { departures: [{ t: NOW + 8 * 60, dest: 'Port Washington', track: '17' }] },
+    njt: { trains: [{ time: NOW + 12 * 60, dest: 'Trenton', track: '3' }] },
+  };
+  const cfg = { widgets: ['weather', 'lirr', 'njt'] };
+  const staleOf = (...ids) => (id) => ids.includes(id);
+  afterEach(() => { for (const id of ['weather', 'lirr', 'mnr', 'njt']) setStripSourceStale(id, false); });
+
+  it('shows everything when every source is fresh (nothing changes)', () => {
+    const out = stripData(caches, cfg, { nowSec: NOW, isStale: staleOf() });
+    expect(out.temp).toBe(84);
+    expect(out.transit.map((t) => t.label)).toEqual(['LIRR · Port Washington · Track 17', 'NJT · Trenton · Track 3']);
+  });
+
+  it('a stale source drops only its own segment', () => {
+    const wx = stripData(caches, cfg, { nowSec: NOW, isStale: staleOf('weather') });
+    expect(wx.temp).toBeNull();
+    expect(wx.cond).toBeNull();
+    expect(wx.transit).toHaveLength(2);
+    const lirr = stripData(caches, cfg, { nowSec: NOW, isStale: staleOf('lirr') });
+    expect(lirr.temp).toBe(84);
+    expect(lirr.transit.map((t) => t.label)).toEqual(['NJT · Trenton · Track 3']);
+  });
+
+  it('with every source stale the strip is the clock alone', () => {
+    const out = stripData(caches, cfg, { nowSec: NOW, isStale: staleOf('weather', 'lirr', 'njt') });
+    expect(out).toEqual({ temp: null, cond: null, transit: [] });
+    const html = stripHtml(out, new Date('2026-07-03T21:30:00'));
+    expect(html).toContain('strip__time');
+    expect(html).not.toContain('strip__wx');
+    expect(html).not.toContain('strip__transit');
+  });
+
+  it('reads the shared registry by default, so every strip host agrees', () => {
+    // The screensaver, the art viewer and the settings preview all call
+    // stripData without an isStale: one state, no second code path.
+    setStripSourceStale('weather', true);
+    expect(stripData(caches, cfg, { nowSec: NOW }).temp).toBeNull();
+    setStripSourceStale('weather', false);
+    expect(stripData(caches, cfg, { nowSec: NOW }).temp).toBe(84);
+  });
+
+  it('an empty registry (a board just booted from cache) shows the cached values', () => {
+    for (const id of ['weather', 'lirr', 'njt']) expect(isStripSourceStale(id)).toBe(false);
+    const out = stripData(caches, cfg, { nowSec: NOW });
+    expect(out.temp).toBe(84);
+    expect(out.transit).toHaveLength(2);
+  });
+
+  it('notifies on a flip, and only on a flip', () => {
+    const seen = [];
+    const off = onStripStaleChange((id, stale) => seen.push(`${id}:${stale}`));
+    setStripSourceStale('lirr', true);
+    setStripSourceStale('lirr', true); // already stale: no redraw
+    setStripSourceStale('lirr', false);
+    setStripSourceStale('lirr', false);
+    off();
+    setStripSourceStale('lirr', true); // unsubscribed
+    expect(seen).toEqual(['lirr:true', 'lirr:false']);
+  });
+});
+
+// main.js boots the board at module scope, so its wiring is read as text (the
+// shell.test.js precedent). What matters: the strip's stale state follows the
+// FETCH outcomes, never the boot restore from cache, and a flip redraws.
+describe('main.js feeds the strip the card\'s stale state', () => {
+  const main = readFileSync(resolve(process.cwd(), 'site/js/main.js'), 'utf8');
+  const startWidget = main.slice(main.indexOf('function startWidget('), main.indexOf('function renderStrip('));
+  const bootRestore = startWidget.slice(startWidget.indexOf('if (cached) {'), startWidget.indexOf('const cancel = schedule('));
+  const fetchTry = startWidget.slice(startWidget.indexOf('try {'), startWidget.indexOf('} catch (err) {'));
+  const fetchCatch = startWidget.slice(startWidget.indexOf('} catch (err) {'), startWidget.indexOf('throw err;'));
+
+  it('the boot restore dims the card but leaves the strip alone', () => {
+    expect(bootRestore).toContain('markStale(');
+    expect(bootRestore).not.toContain('setStripSourceStale');
+  });
+  it('a settled fetch sets the strip from vm.stale, a thrown one marks it stale', () => {
+    expect(fetchTry).toMatch(/setStripSourceStale\(mod\.meta\.id, Boolean\(vm\?\.stale\)\)/);
+    expect(fetchCatch).toMatch(/setStripSourceStale\(mod\.meta\.id, true\)/);
+  });
+  it('redraws the strip whenever a source flips', () => {
+    expect(main).toMatch(/onStripStaleChange\(\(\) => renderStrip\(\)\)/);
+  });
+});
+
+// Sean's pick B (2026-11-13), "use the black bar": pure geometry, against a
+// 1920 x 1040 board. Contain fit centres a narrower picture at full height.
+describe('captionPlacement', () => {
+  const box = { boxW: 1920, boxH: 1040 };
+  const at = (natW, natH, fit) => captionPlacement({ ...box, natW, natH, fit });
+  // A picture of aspect `ar` leaves a side bar of (1920 - 1040 ar) / 2, and the
+  // bar column is that minus the 48 px floor and the 32 px gap.
+  const arForColumn = (col) => (1920 - 2 * (col + CAPTION_LEFT + 32)) / 1040;
+
+  it('leaves a picture as wide as the screen, or wider, at today\'s spot', () => {
+    expect(at(1920, 1040)).toBeNull(); // exact
+    expect(at(1600, 600)).toBeNull(); // wide panorama, letterboxed top and bottom
+  });
+  it('leaves cover fit and an unknown natural size at today\'s spot', () => {
+    expect(at(600, 800, 'cover')).toBeNull();
+    expect(at(0, 0)).toBeNull();
+    expect(at(undefined, undefined)).toBeNull(); // decode failed or not landed yet
+    expect(captionPlacement({ boxW: 0, boxH: 0, natW: 600, natH: 800 })).toBeNull(); // hidden box
+  });
+  it('puts the plate on a 4:3 picture, 24 px in from its corner and held to its width', () => {
+    // 4:3 at 1040 tall is 1387 wide: picture 267 to 1653, a 187 px column.
+    const p = at(1200, 900);
+    expect(p.bar).toBe(false);
+    expect(p.left).toBe(291); // 266.7 + 24
+    expect(p.bottom).toBe(CAPTION_BOTTOM);
+    expect(p.left + p.maxWidth).toBeLessThanOrEqual(1653 - 24 + 1);
+  });
+  it('keeps the 48 px floor when the picture nearly fills the width', () => {
+    const p = at(1880, 1040); // bar 20 px
+    expect(p.bar).toBe(false);
+    expect(p.left).toBe(CAPTION_LEFT);
+    expect(p.bottom).toBe(CAPTION_BOTTOM);
+  });
+  it('a portrait just under the threshold stays on the picture, with the plate', () => {
+    const p = captionPlacement({ ...box, natW: arForColumn(CAPTION_BAR_MIN - 1) * 1000, natH: 1000 });
+    expect(p.bar).toBe(false);
+    expect(p.left).toBeGreaterThan(CAPTION_LEFT + CAPTION_BAR_MIN); // right of the bar, on the art
+  });
+  it('a portrait just over the threshold moves wholly into the bar, no plate', () => {
+    const p = captionPlacement({ ...box, natW: arForColumn(CAPTION_BAR_MIN + 1) * 1000, natH: 1000 });
+    expect(p).toEqual({ bar: true, left: CAPTION_LEFT, bottom: CAPTION_BAR_BOTTOM, maxWidth: CAPTION_BAR_MIN + 1 });
+  });
+  it('never leaves the caption half on the bar: the column ends 32 px short of the picture', () => {
+    // Madame X, 365 x 625: picture 656 to 1264, column 48 to 624.
+    const p = at(365, 625);
+    expect(p.bar).toBe(true);
+    expect(p.left + p.maxWidth).toBeLessThanOrEqual(656 - 32);
+  });
+});
+
+describe('createSlideshow places the caption from the decoded picture', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // The preload's natural size is the only input: every stub Image reports
+    // the size encoded in its file name (w x h), or nothing for "unknown".
+    vi.stubGlobal('Image', class {
+      set src(v) {
+        const m = /(\d+)x(\d+)/.exec(v);
+        this.naturalWidth = m ? Number(m[1]) : 0;
+        this.naturalHeight = m ? Number(m[2]) : 0;
+        queueMicrotask(() => this.onload?.());
+      }
+    });
+  });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  const board = () => {
+    const host = document.createElement('div');
+    Object.defineProperty(host, 'clientWidth', { value: 1920 });
+    Object.defineProperty(host, 'clientHeight', { value: 1040 });
+    return host;
+  };
+
+  it('moves into the bar for a portrait and back onto a wide picture, with the text swap', async () => {
+    const host = board();
+    const show = createSlideshow(
+      [{ img: 'p-365x625.jpg', title: 'Portrait' }, { img: 'w-599x464.jpg', title: 'Wheat' }],
+      host, { intervalMs: 1000, random: () => 0.99 },
+    );
+    show.start();
+    const cap = host.querySelector('.slide-caption');
+    const seen = {};
+    for (const ms of [0, 1000]) {
+      await vi.advanceTimersByTimeAsync(ms);
+      seen[cap.textContent] = { bar: cap.classList.contains('slide-caption--bar'), left: cap.style.left, bottom: cap.style.bottom };
+    }
+    show.stop();
+    // Portrait (365 x 625): a 576 px column in the bar, plain text.
+    expect(seen.Portrait).toEqual({ bar: true, left: '48px', bottom: '96px' });
+    // Wheat (599 x 464): the bar is too narrow, so the plate sits on the
+    // picture, 24 px in from its left edge at 289.
+    expect(seen.Wheat).toEqual({ bar: false, left: '313px', bottom: '82px' });
+  });
+
+  it('a picture whose size is unknown keeps the default spot (no inline position)', async () => {
+    const host = board();
+    const show = createSlideshow([{ img: 'unknown.jpg', title: 'Mystery' }], host, { intervalMs: 1000 });
+    show.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const cap = host.querySelector('.slide-caption');
+    expect(cap.textContent).toBe('Mystery');
+    expect(cap.style.left).toBe('');
+    expect(cap.style.bottom).toBe('');
+    expect(cap.classList.contains('slide-caption--bar')).toBe(false);
+    show.stop();
+  });
+
+  it('cover fit leaves the caption where it is today', async () => {
+    const host = board();
+    const show = createSlideshow([{ img: 'p-365x625.jpg', title: 'Portrait' }], host, { intervalMs: 1000, fit: 'cover' });
+    show.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const cap = host.querySelector('.slide-caption');
+    expect(cap.style.left).toBe('');
+    expect(cap.classList.contains('slide-caption--bar')).toBe(false);
+    show.stop();
   });
 });

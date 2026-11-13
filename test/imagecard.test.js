@@ -11,6 +11,9 @@ import * as art from '../site/js/widgets/art.js';
 import * as landscapes from '../site/js/widgets/landscapes.js';
 import * as apod from '../site/js/widgets/apod.js';
 import * as chart from '../site/js/widgets/chart.js';
+import { setStripSourceStale } from '../site/js/ambient.js';
+import { saveCache } from '../site/js/store.js';
+import { installLocalStorage } from './stubs/localstorage.js';
 
 const CFG = { name: 'Sean' };
 const host = () => document.createElement('div');
@@ -642,5 +645,65 @@ describe('the photo viewer: a late swipe cannot overwrite a newer one', () => {
 
     document.querySelector('#art-viewer')?.remove();
     vi.useRealTimers();
+  });
+});
+
+// The viewer's strip and caption follow the screensaver's rules (Sean's picks,
+// 2026-11-13): stale sources drop out of the band, and the caption is placed
+// from the picture's real rectangle once its natural size is known.
+describe('openImageViewer: strip staleness and caption placement', () => {
+  const sized = (el, w, h) => {
+    Object.defineProperty(el, 'clientWidth', { value: w, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: h, configurable: true });
+  };
+  const natural = (img, w, h) => {
+    Object.defineProperty(img, 'naturalWidth', { value: w, configurable: true });
+    Object.defineProperty(img, 'naturalHeight', { value: h, configurable: true });
+  };
+  beforeEach(() => { installLocalStorage(); });
+  afterEach(() => {
+    document.querySelector('#art-viewer')?.remove();
+    setStripSourceStale('weather', false);
+  });
+
+  it('drops a stale source from the viewer strip the moment it flips, and brings it back', () => {
+    saveCache('weather', { now: { temp: 84, label: 'Mostly clear' } });
+    openImageViewer({ img: 'https://x.test/w.jpg', title: 'W' }, { widgets: ['weather'] });
+    const strip = document.querySelector('#art-viewer .strip');
+    expect(strip.textContent).toContain('84°');
+    setStripSourceStale('weather', true); // no 30 s wait: the flip redraws
+    expect(strip.textContent).not.toContain('84°');
+    expect(strip.querySelector('.strip__time')).not.toBeNull(); // the clock stays
+    setStripSourceStale('weather', false);
+    expect(strip.textContent).toContain('84°');
+  });
+
+  it('holds the default spot until the opening photo loads, then moves into the bar', () => {
+    const item = { img: 'https://x.test/portrait.jpg', title: 'Madame X', artist: 'Sargent', desc: 'A long description.' };
+    openImageViewer(item, CFG, { list: [item] });
+    const viewer = document.querySelector('#art-viewer');
+    const cap = viewer.querySelector('.slide-caption');
+    expect(cap.style.left).toBe(''); // size unknown: today's CSS position, not a guess
+    sized(viewer, 1920, 1040);
+    const img = viewer.querySelector('.art-viewer__img');
+    natural(img, 365, 625);
+    img.dispatchEvent(new Event('load'));
+    expect(cap.classList.contains('slide-caption--bar')).toBe(true);
+    expect(cap.style.left).toBe('48px');
+    expect(cap.style.maxWidth).toBe('576px'); // the bar column, so the description wraps inside it
+    expect(cap.querySelector('.slide-caption__desc')).not.toBeNull(); // the long description still renders
+  });
+
+  it('a cover-fit viewer keeps the caption at the default spot', () => {
+    const item = { img: 'https://x.test/l.jpg', title: 'Fjord' };
+    openImageViewer(item, CFG, { list: [item], fit: 'cover' });
+    const viewer = document.querySelector('#art-viewer');
+    sized(viewer, 1920, 1040);
+    const img = viewer.querySelector('.art-viewer__img');
+    natural(img, 365, 625);
+    img.dispatchEvent(new Event('load'));
+    const cap = viewer.querySelector('.slide-caption');
+    expect(cap.style.left).toBe('');
+    expect(cap.classList.contains('slide-caption--bar')).toBe(false);
   });
 });
