@@ -741,9 +741,12 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .slide.slide--cut { transition: none; }
 /* This Day in History, full screen (Sean's pick, mockup A): the grand
    centered reading list — every event of the day, year leading each line in
-   the light numeral style, ~70ch measure. Ten events at these sizes use
-   roughly 640px of the 814px body; overflow hidden is the backstop for a
-   feed that some day returns more than the mapper's nine. */
+   the light numeral style, ~70ch measure. Nine one-line events at these sizes
+   use roughly 570px of the 814px body, but a day of long facts does not fit:
+   eight two-line events and one short one stand about 870px, and a centred
+   column that overflows is cropped at both ends. history.js measures the list
+   on open (fitHistoryBoard) and walks the data-fit steps below only as far as
+   it needs to; overflow hidden is the backstop behind that. */
 .expand__body .history-board {
   height: 100%; display: flex; flex-direction: column; justify-content: center;
   gap: 24px; max-width: 1280px; margin: 0 auto; overflow: hidden;
@@ -754,6 +757,26 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    a tap on those. Only the size grows; weight rides the light-numeral block. */
 .history-board .history__year { font-size: 30px; color: var(--accent); }
 .history-board .history__text { color: var(--ink-mid); }
+/* The fit ladder (history.js BOARD_FITS). Step 1 spends only the air between
+   events, so a day that is a little too long keeps its reading size. Steps 2
+   to 4 bring the type down two pixels at a time, the year four above the text
+   throughout, and stop at the 20px floor. */
+.expand__body .history-board[data-fit="1"] { gap: 16px; }
+.expand__body .history-board[data-fit="2"] { gap: 14px; }
+.expand__body .history-board[data-fit="3"] { gap: 12px; }
+.expand__body .history-board[data-fit="4"] { gap: 10px; }
+.history-board[data-fit="2"] .history__item { font-size: 24px; }
+.history-board[data-fit="3"] .history__item { font-size: 22px; }
+.history-board[data-fit="4"] .history__item { font-size: 20px; }
+.history-board[data-fit="2"] .history__year { font-size: 28px; }
+.history-board[data-fit="3"] .history__year { font-size: 26px; }
+.history-board[data-fit="4"] .history__year { font-size: 24px; }
+/* Past the last step: every event keeps the same number of whole lines and ends
+   in an ellipsis, so no year of the day leaves the screen. */
+.history-board--clamped .history__text {
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  -webkit-line-clamp: var(--board-clamp);
+}
 
 /* (Swiped photo surfaces need no further CSS: swipeFadeThrough in
    imageshow.js fades the existing layer itself with inline transitions —

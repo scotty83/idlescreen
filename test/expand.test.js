@@ -1290,6 +1290,81 @@ describe('history card tap', () => {
     card.click();
     expect(isExpandOpen()).toBe(false);
   });
+
+  // ---- the measured fit of the reading list ----
+  // happy-dom has no layout engine, so the list is faked on real elements:
+  // `stack(fit, clamp)` is the height the events stand at for a given ladder
+  // step and line clamp, and the canvas is 814px, a Board Pro's.
+  const { fitHistoryBoard, BOARD_FITS } = history;
+  const fakeList = (stack, lines = 3) => {
+    const body = document.createElement('div');
+    body.innerHTML = `<div class="history history-board">${[1900, 1950, 2000].map((y) =>
+      `<div class="history__item"><span class="history__year">${y}</span><span class="history__text">x</span></div>`).join('')}</div>`;
+    const board = body.querySelector('.history-board');
+    Object.defineProperty(board, 'clientHeight', { value: 814 });
+    const fit = () => Number(board.dataset.fit ?? 0);
+    const clamp = () => Number(board.style.getPropertyValue('--board-clamp') || lines);
+    const items = [...board.children];
+    items[0].getBoundingClientRect = () => ({ top: 0, bottom: 10 });
+    items[2].getBoundingClientRect = () => ({ top: 0, bottom: stack(fit(), clamp()) });
+    // getComputedStyle gives no line-height here, so the fit reads one "line"
+    // as 1px and a text standing `lines` px tall is `lines` lines.
+    board.querySelectorAll('.history__text').forEach((t) => { t.getBoundingClientRect = () => ({ height: lines }); });
+    return { body, board };
+  };
+
+  it('leaves a list that fits exactly as it opened', () => {
+    const { body, board } = fakeList(() => 640);
+    fitHistoryBoard(body);
+    expect(board.dataset.fit).toBeUndefined();
+    expect(board.classList.contains('history-board--clamped')).toBe(false);
+  });
+
+  it('tightens only as far as the list needs', () => {
+    // 2026-11-13 on a board: about 60px over, and closing the gaps is enough.
+    const near = fakeList((fit) => 870 - fit * 64);
+    fitHistoryBoard(near.body);
+    expect(near.board.dataset.fit).toBe('1');
+    const far = fakeList((fit) => 1000 - fit * 64);
+    fitHistoryBoard(far.body);
+    expect(far.board.dataset.fit).toBe('3');
+    expect(far.board.classList.contains('history-board--clamped')).toBe(false);
+  });
+
+  it('clamps every event to the same whole lines once the ladder is spent', () => {
+    // Three-line facts that still stand too tall at the last step: two lines fit.
+    const { body, board } = fakeList((fit, clamp) => 1200 - fit * 64 - (3 - clamp) * 200);
+    fitHistoryBoard(body);
+    expect(board.dataset.fit).toBe(String(BOARD_FITS));
+    expect(board.classList.contains('history-board--clamped')).toBe(true);
+    expect(board.style.getPropertyValue('--board-clamp')).toBe('2');
+  });
+
+  it('stops at one line and never drops an event', () => {
+    const { body, board } = fakeList(() => 5000);
+    fitHistoryBoard(body);
+    expect(board.style.getPropertyValue('--board-clamp')).toBe('1');
+    expect(board.querySelectorAll('.history__item').length).toBe(3);
+  });
+
+  it('does nothing without a layout engine, an empty body, or no body at all', () => {
+    const { card } = histBoard(histVm(9));
+    card.querySelector('.card__body').click();
+    expect(overlay().querySelector('.history-board').dataset.fit).toBeUndefined();
+    expect(() => fitHistoryBoard(document.createElement('div'))).not.toThrow();
+    expect(() => fitHistoryBoard(null)).not.toThrow();
+  });
+
+  it('has a stylesheet step for every rung of the ladder, and no rung past it', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+    for (let step = 1; step <= BOARD_FITS; step++) {
+      expect(css, `no data-fit="${step}" rule`).toContain(`.history-board[data-fit="${step}"]`);
+    }
+    expect(css).not.toContain(`.history-board[data-fit="${BOARD_FITS + 1}"]`);
+    // The last step is the type floor: nothing in the reading view goes under 20px.
+    expect(css).toContain(`.history-board[data-fit="${BOARD_FITS}"] .history__item { font-size: 20px; }`);
+    expect(css).toContain('.history-board--clamped .history__text');
+  });
 });
 
 /**

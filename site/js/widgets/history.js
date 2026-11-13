@@ -18,6 +18,47 @@ export const meta = { id: 'history', title: 'This Day in History', refreshMs: 24
 export const cutShort = (body) =>
   [...body.querySelectorAll('.history__text')].some((t) => t.scrollHeight > t.clientHeight + 1);
 
+// The reading view's tightening ladder: how many steps past the resting sizes
+// main.css draws under .history-board[data-fit="N"]. Step 1 only closes the gaps
+// between events; 2 to 4 also bring the type down a notch each, ending at the
+// 20px floor. test/expand.test.js reads the stylesheet back to keep the two in
+// step.
+export const BOARD_FITS = 4;
+
+// Fits the full-day reading list to the canvas it opened on. The list is every
+// event of the day at reading size, centred in the overlay body, and the sizes
+// in main.css were set for a day of mostly one-line facts. A day of long ones
+// (2026-11-13: eight of nine ran to two lines) stood about 60px taller than the
+// canvas, and a centred column that overflows is cropped at BOTH ends: half a
+// fact off the top, half off the bottom. So the view measures itself on open,
+// the contract subway's alert wall already runs (expand.js `onOpen`), and walks
+// the ladder above only as far as it must. A list that fits is left alone.
+//
+// Past the last step the events are clamped to one shared number of whole
+// lines, ending in an ellipsis, so every year of the day stays on screen. That
+// takes nine facts of three-plus lines each at the smallest size; it is the
+// backstop, not a state a normal day reaches.
+export function fitHistoryBoard(body) {
+  const board = body?.querySelector?.('.history-board');
+  if (!board?.clientHeight) return; // no layout engine (unit tests)
+  const items = [...board.children];
+  if (!items.length) return;
+  // Measured off the rows, not scrollHeight: a centred overflow spills off both
+  // ends and scrollHeight only counts the far one, so it reads half the excess.
+  const spill = () =>
+    items[items.length - 1].getBoundingClientRect().bottom - items[0].getBoundingClientRect().top - board.clientHeight;
+  for (let step = 1; step <= BOARD_FITS && spill() > 0; step++) board.dataset.fit = String(step);
+  if (spill() <= 0) return;
+  const texts = [...board.querySelectorAll('.history__text')];
+  const lineH = parseFloat(getComputedStyle(texts[0]).lineHeight) || 1;
+  let clamp = Math.max(...texts.map((t) => Math.round(t.getBoundingClientRect().height / lineH)));
+  board.classList.add('history-board--clamped');
+  while (spill() > 0 && clamp > 1) {
+    clamp -= 1;
+    board.style.setProperty('--board-clamp', String(clamp));
+  }
+}
+
 export function render(el, vm, _cfg) {
   if (!vm.events?.length) {
     el.innerHTML = '<div class="empty">No events for today</div>';
@@ -71,6 +112,7 @@ export function render(el, vm, _cfg) {
     // yesterday, and labelling them with today's date is the mismatch this fixes.
     note: new Date(vm.date ?? Date.now()).toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
     bodyHtml: `<div class="history history-board">${rows.join('')}</div>`,
+    onOpen: fitHistoryBoard,
   }));
 }
 
