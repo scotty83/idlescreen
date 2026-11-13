@@ -34,7 +34,7 @@ There is no "Off" here: a board that should never show a screensaver sets
 
 | Toggle | What it does |
 | --- | --- |
-| **Info strip** | A slim band along the bottom: current weather and your next departures |
+| **Info strip** | A slim band along the bottom: current weather and your next departures. When the board cannot refresh the weather or a train line, that part leaves the strip until it updates again |
 | **Hour markers** | Tick marks on the clock faces |
 | **Backdrop image** | A curated photo behind a clock face — one per day |
 
