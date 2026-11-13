@@ -5,7 +5,8 @@ description: "Dow, Nasdaq and S&P by default, plus any tickers you add — each 
 
 The Dow, Nasdaq and S&P out of the box, plus any tickers you add — each with
 a small sparkline and today's change. The card shows as many as fit at its
-size and counts the rest in its corner.
+size and counts the rest in its corner. At its smallest size (3 wide, 2 tall)
+the card leaves out the sparklines so the ticker names fit.
 
 **Tap the card** for the full ticker wall — every symbol you follow on one
 screen.
