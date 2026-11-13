@@ -1801,6 +1801,11 @@ body.mode-ambient .gear--edit { display: none; }
 .wall__bullets .bullet { width: 60px; height: 60px; font-size: 32px; }
 .wall__count { margin-left: auto; flex: none; font-size: 22px; line-height: 60px; color: var(--ink-faint); }
 .wall--good-only { justify-content: center; } /* an all-good morning centers its one band */
+/* ...across as well as down. The board now opens on every tap (2026-11-13), so
+   a six-line good-service day shows a short band; at full width its count sat
+   ~1000px from the last bullet. Shrink-wrapped, label, bullets and count read
+   as one group, and a band long enough to wrap still takes the full width. */
+.wall--good-only .wall__good { align-self: center; max-width: 100%; }
 /* overflow-y is the never-clip backstop, not the plan: subway.js sizes the wells
    so they fit, and a transient overlay is the one place the board may scroll
    (auto-close guarantees no residue). It only ever engages past a dozen-odd
@@ -2644,6 +2649,10 @@ body.mode-ambient .gear--edit { display: none; }
 .cbwell__sub { margin-top: 6px; font-size: 22px; color: var(--ink-dim); }
 .cbwell__e { color: var(--accent); font-weight: 600; }
 .cbwell--off .cbwell__name { color: var(--ink-dim); }
+/* A lone station, which the view only shows since every card opens on a tap
+   (2026-11-13): centered at its usual column width, not stranded in the left
+   column of an empty pair. */
+.cbboard__grid > .cbwell:only-child { grid-column: 1 / -1; justify-self: center; width: calc(50% - 20px); }
 /* Search-result buttons (weather cities, Citi Bike stations). The container
    had no rule at all — spacing was an accident of inline flow, and the new
    inline-flex .btn removed it, leaving results flush against the keyboard. */

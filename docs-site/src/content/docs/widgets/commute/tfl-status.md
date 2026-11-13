@@ -8,8 +8,8 @@ line you pick as a colored dot with **Good Service** or its current
 disruption, covering the Tube, the Elizabeth line, the DLR and the
 Overground.
 
-**Tap the card** for the full status board; tap a disrupted line there for the
-complete reason.
+**Tap the card** for the full status board: disrupted lines first, each with
+its complete reason, and every line running normally listed beneath.
 
 ## Configure
 
