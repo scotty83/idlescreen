@@ -420,7 +420,7 @@ describe('setup step copy for the empty states', () => {
   });
 });
 
-import { NAV_MODEL, navGroupForSection, SECTION_IDS, navHtml } from '../site/js/settings/settings.js';
+import { NAV_MODEL, navGroupForSection, SECTION_IDS, navHtml, nearestScrollTop } from '../site/js/settings/settings.js';
 import { widgetChecksHtml } from '../site/js/settings/setup.js';
 import { WIDGET_LABELS as SETUP_LABELS } from '../site/js/settings/setup.js';
 
@@ -715,6 +715,71 @@ describe('navHtml', () => {
     expect(html).toMatch(/data-group="Commute"[^>]*aria-expanded="true"/);
     expect((html.match(/settings__navkids is-open/g) || []).length).toBe(1); // only Commute open
     expect(html).toMatch(/settings__navchild is-active"[^>]*data-section="subway"/);
+  });
+});
+
+// The rail keeps the row just picked in full view. An open group (Commute has
+// ten children) pushed Citi Bike half under the Save button and TfL Status
+// wholly out of the nav's box (browser-measured at 1920x1040: 23px and 71px
+// hidden). The arithmetic is block: 'nearest', aimed at the nav alone, so it is
+// pinned here as a pure function and then through the real renderNav with the
+// two rects it reads faked (happy-dom has no layout).
+describe('the rail reveals its active row', () => {
+  const view = { top: 65, bottom: 810 };
+  it('scrolls down just far enough for a row cut off at the bottom', () => {
+    expect(nearestScrollTop(0, view, { top: 789, bottom: 833 })).toBe(23);
+    expect(nearestScrollTop(0, view, { top: 837, bottom: 881 })).toBe(71);
+  });
+  it('scrolls up just far enough for a row cut off at the top', () => {
+    expect(nearestScrollTop(100, view, { top: 40, bottom: 84 })).toBe(75);
+  });
+  it('leaves the nav where it is when the row is already whole, edges included', () => {
+    expect(nearestScrollTop(40, view, { top: 400, bottom: 444 })).toBe(40);
+    expect(nearestScrollTop(40, view, { top: 65, bottom: 109 })).toBe(40);
+    expect(nearestScrollTop(40, view, { top: 766, bottom: 810 })).toBe(40);
+  });
+
+  describe('through renderNav', () => {
+    // Every nav button sits on a 48px pitch from the nav's top edge, and moves
+    // with the nav's scrollTop, which is all the reveal reads.
+    const PITCH = 48;
+    let realRect;
+    beforeEach(() => {
+      realRect = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.getBoundingClientRect = function rect() {
+        if (this.classList.contains('settings__nav')) return { ...view, height: view.bottom - view.top };
+        const nav = this.closest('.settings__nav');
+        if (!nav) return realRect.call(this);
+        const rows = [...nav.querySelectorAll('button')];
+        const top = view.top + rows.indexOf(this) * PITCH - nav.scrollTop;
+        return { top, bottom: top + 44, height: 44 };
+      };
+      document.body.innerHTML = '<div id="settings-root"></div>';
+    });
+    afterEach(() => {
+      HTMLElement.prototype.getBoundingClientRect = realRect;
+      closeSettings();
+    });
+    const nav = () => document.querySelector('.settings__nav');
+    const rowIndex = (id) => [...nav().querySelectorAll('button')]
+      .indexOf(nav().querySelector(`[data-section="${id}"]`));
+
+    it('brings a group child below the fold fully into view, and only the nav moves', async () => {
+      await openSettings(normalizeConfig({}), { focus: 'tfl' });
+      const bottom = view.top + rowIndex('tfl') * PITCH + 44;
+      expect(bottom).toBeGreaterThan(view.bottom); // the case: TfL starts out of view
+      expect(nav().scrollTop).toBe(bottom - view.bottom);
+      expect(document.querySelector('.settings__pane').scrollTop).toBe(0);
+      expect(document.documentElement.scrollTop).toBe(0);
+    });
+
+    it('does not move the nav when the picked row is already whole', async () => {
+      await openSettings(normalizeConfig({}), { focus: 'subway' });
+      expect(nav().scrollTop).toBe(0);
+      nav().scrollTop = 30;
+      nav().querySelector('[data-section="lirr"]').click();
+      expect(nav().scrollTop).toBe(30);
+    });
   });
 });
 
@@ -1053,12 +1118,29 @@ describe('Settings → What’s new', () => {
     expect(document.querySelector('.settings__pane .pane__title').textContent).toBe('What’s new');
     expect(document.querySelectorAll('.settings__pane .log__group').length).toBe(shippedLog.length);
     expect(entry().classList.contains('is-active')).toBe(true);
-    // The nav highlight never moved, so back has somewhere honest to go.
-    expect(document.querySelector('.settings__navitem.is-active').textContent).toBe('Display');
+    // The notes are the one thing selected: the section row sheds its
+    // highlight (two rows both reading as current was the defect), but the
+    // section itself is kept, so back has somewhere honest to go.
+    expect(document.querySelector('.settings__nav .is-active')).toBeNull();
     document.querySelector('[data-wn-back]').click();
     await settle();
     expect(document.querySelector('.settings__pane .pane__title').textContent).toBe('Display');
     expect(entry().classList.contains('is-active')).toBe(false);
+    expect([...document.querySelectorAll('.settings__nav .is-active')].map((b) => b.textContent)).toEqual(['Display']);
+  });
+
+  it('restores the section highlight after a trip through the notes from a group child', async () => {
+    document.body.innerHTML = '<div id="settings-root"></div>';
+    window.__signage = { version: 'fa395c8b41d2' };
+    await openSettings(normalizeConfig({}), { focus: 'citibike' });
+    await settle();
+    entry().click();
+    await settle();
+    expect(document.querySelector('.settings__nav .is-active')).toBeNull();
+    document.querySelector('[data-wn-back]').click();
+    await settle();
+    expect(document.querySelector('.settings__pane .pane__title').textContent).toBe('Citi Bike');
+    expect([...document.querySelectorAll('.settings__nav .is-active')].map((b) => b.textContent)).toEqual(['Citi Bike']);
   });
 
   it('drops the active mark when the reader picks a nav section instead of backing out', async () => {
@@ -1069,6 +1151,7 @@ describe('Settings → What’s new', () => {
     await settle();
     expect(entry().classList.contains('is-active')).toBe(false);
     expect(document.querySelector('.settings__pane .pane__title').textContent).toContain('Widgets');
+    expect([...document.querySelectorAll('.settings__nav .is-active')].map((b) => b.textContent)).toEqual(['Widgets']);
   });
 
   it('leaves Save and Cancel working after a trip through the notes', async () => {

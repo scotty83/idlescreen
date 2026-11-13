@@ -308,7 +308,7 @@ describe('widget renderers', () => {
     history.render(hc.querySelector('.card__body'), { events: Array.from({ length: 20 }, (_, i) => ({ year: 1900 + i, text: `Event ${i}` })) }, CFG);
     // History expands and news does not, and the corner says exactly the same
     // thing on both: one form board-wide (2026-08-01), text only (2026-08-02).
-    expect(hc.querySelector('.card__more')?.textContent).toBe('+18');
+    expect(hc.querySelector('.card__more')?.textContent).toBe('+19'); // one event at 3x2, unmeasured
     expect(hc.querySelector('.card__more svg')).toBeNull();
     expect(hc.classList.contains('has-more')).toBe(true);
     hc.remove();

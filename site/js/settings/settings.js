@@ -221,9 +221,33 @@ export function navHtml(section, openGroup, cfg = null) {
   }).join('');
 }
 
+// The nav's new scrollTop that brings a row fully into view, or the current one
+// when it already is: `block: 'nearest'` semantics, worked out in the nav's own
+// coordinates. Pure so the arithmetic is testable without a layout engine; the
+// rects are getBoundingClientRect() boxes of the nav and the row.
+export function nearestScrollTop(scrollTop, view, row) {
+  if (row.top < view.top) return scrollTop - (view.top - row.top);
+  if (row.bottom > view.bottom) return scrollTop + (row.bottom - view.bottom);
+  return scrollTop;
+}
+
+// An open group (Commute has ten children) can push the row just picked under
+// the rail footer, half of it showing above Save. This is scrollIntoView({
+// block: 'nearest' }) aimed at the nav alone: scrollIntoView also scrolls every
+// scrolling ancestor, and on the board that includes the page itself (html and
+// body are overflow: hidden, which a script can still scroll), so the nav's own
+// scrollTop is set instead. A row already in full view leaves the nav still.
+function revealActiveNav(nav) {
+  const row = nav.querySelector('[data-section].is-active');
+  if (!row) return;
+  const next = nearestScrollTop(nav.scrollTop, nav.getBoundingClientRect(), row.getBoundingClientRect());
+  if (next !== nav.scrollTop) nav.scrollTop = next;
+}
+
 function renderNav() {
   const nav = state.root.querySelector('.settings__nav');
   nav.innerHTML = navHtml(state.section, state.openGroup, state.cfg);
+  revealActiveNav(nav);
   nav.querySelectorAll('[data-section]').forEach((btn) =>
     btn.addEventListener('click', () => {
       state.section = btn.dataset.section;
@@ -296,15 +320,23 @@ function renderSection() {
 // a 734px box on a default board and 717px on a board also showing the
 // advanced Live Video row (15 rows, the most there can be), so neither scrolls
 // at rest. test/viewport.test.js guards the geometry that makes that true.
+//
+// While the notes are up, the footer entry is the one thing that reads as
+// selected: the section row keeps state.section (back returns there) but sheds
+// its highlight, and gets it back the moment the reader leaves the notes by
+// either door, back or a nav row (both run renderSection, which calls this).
 function markWhatsNew(on) {
-  state?.root.querySelector('[data-whatsnew]')?.classList.toggle('is-active', on);
+  if (!state) return;
+  state.root.querySelector('[data-whatsnew]')?.classList.toggle('is-active', on);
+  state.root.querySelectorAll('.settings__nav [data-section]').forEach((btn) =>
+    btn.classList.toggle('is-active', !on && btn.dataset.section === state.section));
 }
 
 // Same async shape as the section renderers (capture the token, bail if the
 // user navigated on), and it bumps the token itself so a section fetch still in
 // flight cannot repaint over the notes. Reached only from the footer, so the
-// pane carries its own back button; back re-renders whichever section the nav
-// is still highlighting, which is exactly where the reader came from.
+// pane carries its own back button; back re-renders state.section, which the
+// notes never change, so it is exactly where the reader came from.
 async function openWhatsNew() {
   navToken += 1;
   const _nav = navToken;

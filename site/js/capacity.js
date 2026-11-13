@@ -85,7 +85,14 @@ export const MODELS = {
   // fits; 50 is the measured safe average (never overflows worst-case configs
   // 3x3–4x8, hint included) — e.g. a 3x3 now packs 5 rows, not 2.
   bus: listCapacity(50, 56),
-  history: listCapacity(64, 54),
+  // History's shallow tier promises one event, its worst case at every width.
+  // There the renderer measures (history.js): an event may take two lines, any
+  // event its clamp would cut is shed, and a lone survivor gets three, so a day
+  // of long facts shows one event however wide the card is. Short facts show
+  // two or three, which the count under-states; it must never over-state. The
+  // old 54px shallow pitch promised two one-line rows that no longer exist.
+  // Medium and tall cards are unmeasured and keep their 64px pitch.
+  history: (w, h) => (sizeTier(h) === 's' ? 1 : Math.max(1, Math.floor(bodyPx(h) / 64))),
   // 74px pitch (was a too-tall 94 that estimated ~row+gap far above the ~66px
   // t-m rows) makes a 3×3 fit 3 teams instead of 2 — verified worst-case
   // (all-3-line rows) overflow-safe with the t-m font compaction below.
@@ -216,7 +223,7 @@ export function capacityLabel(id, w, h, cfg = {}) {
     case 'ferry':
       return `next ${n} ferries`;
     case 'history':
-      return `${n} events`;
+      return `${n} event${n === 1 ? '' : 's'}`;
     case 'sports':
       return ofTotal(Math.min(n, cfg.sports?.teams?.length ?? n), cfg.sports?.teams?.length, 'teams');
     case 'news':
@@ -330,6 +337,11 @@ export function cardSize(el, defaults = [4, 4]) {
 //   slack       pixels of overflow to tolerate before shedding. F1 shipped
 //               with one of them; unifying it to zero would cost a standings
 //               row on a hairline overflow.
+//   clipped(body)  a second way for a draw not to fit, checked beside the box:
+//               true when something drawn is cut short even though the body
+//               does not overflow. History's shallow card counts an event its
+//               line clamp ellipsised as not fitting, because a row is only
+//               worth its place whole.
 //   badge       stamp the corner count with what the fit left out. Off unless
 //               asked, because three families count something else: the rail
 //               boards count after their own measured fit, the news family
@@ -341,7 +353,7 @@ export function cardSize(el, defaults = [4, 4]) {
 export function fitList(body, {
   id, items, draw, defaultSize = [4, 4],
   min = 0, fallback = null, reserve = 0,
-  measure = false, squeeze = false, slack = 0, badge = false,
+  measure = false, squeeze = false, slack = 0, badge = false, clipped = null,
 }) {
   const [w, h] = cardSize(body, defaultSize);
   // The estimate, and the whole answer wherever there is no rendered box to
@@ -353,7 +365,7 @@ export function fitList(body, {
   if (items) n = Math.min(items.length, n);
   draw(n);
   if (measure && body.clientHeight > 0) {
-    const over = () => body.scrollHeight > body.clientHeight + slack;
+    const over = () => body.scrollHeight > body.clientHeight + slack || !!clipped?.(body);
     // A card sheds down to its last row and no further: one row too few is the
     // corner count doing its job, half a row of clipping is a bug.
     const floor = Math.max(1, min);

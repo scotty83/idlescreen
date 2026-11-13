@@ -168,7 +168,7 @@ export const DEMAND = {
 // height would be decoration (worldclock shows 3 cities at its shallow 3x2 and
 // 5 at its canonical 2x3 — three is the same "reads as the network" threshold
 // the status boards below take as their floor — golf 5 players at 3x3, history
-// 2 events at 2x2, bus a full stop at 3x3), and test/layout-optimize.test.js
+// 1 event at 2x2, bus a full stop at 3x3), and test/layout-optimize.test.js
 // fails if a row here is inert.
 // ---------------------------------------------------------------------------
 export const FLOOR = {

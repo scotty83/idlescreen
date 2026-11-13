@@ -163,12 +163,14 @@ const pillChars = (header) => statusLabel(header).length + PILL_CHARS;
 // lead header pays for the pill: one well, one pill. Route tokens are counted as
 // the characters they are written as, which is a touch more than the bullet that
 // replaces them draws — erring long here only ever buys a well more room.
-export function wellHeight(headers, step) {
-  const lines = headers.reduce(
+export function wellLines(headers, step) {
+  return headers.reduce(
     (n, h, i) => n + Math.max(1, Math.ceil((String(h).length + (i ? 0 : pillChars(h))) / step.chars)),
     0,
   );
-  const text = lines * step.line + Math.max(headers.length - 1, 0) * step.para;
+}
+export function wellHeight(headers, step) {
+  const text = wellLines(headers, step) * step.line + Math.max(headers.length - 1, 0) * step.para;
   return Math.round(step.pad + Math.max(step.bullet, text));
 }
 
@@ -220,8 +222,10 @@ export function alertStep(alerting, bRows = 0) {
 // bullet band alone (centered, no empty region) and a total meltdown is all
 // wells on the full canvas.
 // `rung` pins the ladder to one exact step, which is how fitStatusBoard puts a
-// tape measure to each of them; null leaves the choice to the model.
-export function statusBoard(lines, rung = null) {
+// tape measure to each of them; null leaves the choice to the model. `clamp`
+// cuts every well's prose to that many whole lines (fitStatusBoard's last stage,
+// below); null draws every word.
+export function statusBoard(lines, rung = null, clamp = null) {
   const good = lines.filter((l) => l.ok);
   const alerting = lines.filter((l) => !l.ok);
   const bullet = (l) => `<span class="bullet bullet--${escapeHtml(l.line)}">${escapeHtml(l.line)}</span>`;
@@ -250,8 +254,10 @@ export function statusBoard(lines, rung = null) {
         .join('')
       : alerting.map(well).join('');
     // The rung rides on the element so fitStatusBoard knows where to resume.
+    const cut = clamp == null ? '' : ' wall__alerts--clamped';
+    const clampCss = clamp == null ? '' : `;--well-clamp:${clamp}`;
     bands.push(
-      `<div class="wall__alerts${step.cols > 1 ? ' wall__alerts--split' : ''}" data-rung="${ALERT_STEPS.indexOf(step)}" style="${step.css}--well-space:${ALERT_GAP}px">${body}</div>`,
+      `<div class="wall__alerts${step.cols > 1 ? ' wall__alerts--split' : ''}${cut}" data-rung="${ALERT_STEPS.indexOf(step)}" style="${step.css}--well-space:${ALERT_GAP}px${clampCss}">${body}</div>`,
     );
   }
   // A band with no wells under it centers rather than stranding itself at the
@@ -279,19 +285,55 @@ export function statusBoard(lines, rung = null) {
 // column wraps a well taller, so at sixteen alerting lines the three-column
 // floor loses more of the wall than the two-column rung above it. Bounded by the
 // six rungs, and only ever paid on a morning that was already going to clip.
+//
+// A rung that spills least still spills, and what it spills is the bottom row
+// of wells cut through the middle of a sentence. So when no rung holds, one
+// further stage gives up the right thing: not a line (which lines are affected
+// is the fact the wall exists to state) but the TAIL of each well's prose. Every
+// well is clamped to the same whole number of lines, with an ellipsis, at the
+// largest clamp the tape measure says the wall holds, walking down one line at a
+// time from the longest well the model prices at that rung (the model can be a
+// line out either way, and a clamp at or past a well's real length cuts nothing
+// and simply spills again, so the walk just steps on). A subway line's second
+// alert is the first thing to go, because it sits at the tail.
+//
+// The rungs are tried in the order they spilled, least first, so the wall keeps
+// the type the ladder would have chosen whenever a clamp can make it hold. A
+// clamp cannot shrink a well below its bullet frame, though, so a rung can still
+// spill at one line: sixteen alerting lines leave the two-column rung 15px over
+// at a one-line clamp, while the three-column rung beside it holds at two. Hence
+// every rung gets its turn before the wall settles for the (rung, clamp) that
+// spilled least. Bounded by six rungs times a well's line count, and only ever
+// paid on a morning that was already going to clip.
 export function fitStatusBoard(body, lines) {
   const wall = () => body?.querySelector?.('.wall__alerts');
   if (!wall()?.clientHeight) return; // no layout engine (unit tests)
   const spill = () => wall().scrollHeight - wall().clientHeight;
-  let best = { rung: Number(wall().dataset.rung ?? 0), spill: spill() };
+  let best = { rung: Number(wall().dataset.rung ?? 0), spill: spill(), clamp: null };
   if (best.spill <= 0) return;
+  const spills = [];
   for (let r = 0; r < ALERT_STEPS.length; r++) {
     body.innerHTML = statusBoard(lines, r);
     const s = spill();
-    if (s < best.spill) best = { rung: r, spill: s };
+    spills.push({ rung: r, spill: s });
+    if (s < best.spill) best = { rung: r, spill: s, clamp: null };
     if (s <= 0) break;
   }
-  body.innerHTML = statusBoard(lines, best.rung);
+  if (best.spill > 0) {
+    const alerting = lines.filter((l) => !l.ok);
+    clampWalk:
+    for (const { rung } of spills.sort((a, b) => a.spill - b.spill)) {
+      const step = ALERT_STEPS[rung];
+      const longest = Math.max(...alerting.map((l) => wellLines(l.headers, step)));
+      for (let c = longest; c >= 1; c--) {
+        body.innerHTML = statusBoard(lines, rung, c);
+        const s = spill();
+        if (s < best.spill) best = { rung, spill: s, clamp: c };
+        if (s <= 0) break clampWalk;
+      }
+    }
+  }
+  body.innerHTML = statusBoard(lines, best.rung, best.clamp);
 }
 
 export function render(el, vm, cfg) {

@@ -9,11 +9,15 @@
 // widgets. happy-dom for the corner-count half (a real card, the real badge);
 // the measured half runs on a fake body, because happy-dom has no layout engine
 // and the loops read exactly two numbers.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fitList, itemCapacity } from '../site/js/capacity.js';
 import { mountCard } from './helpers/board.js';
 import * as subway from '../site/js/widgets/subway.js';
 import * as f1 from '../site/js/widgets/f1.js';
+import * as history from '../site/js/widgets/history.js';
 
 // A body whose height is DERIVED from what was last drawn into it: n rows at
 // rowPx, with the squeezed row costing squeezedPx instead. That is the same
@@ -61,7 +65,7 @@ describe('the estimate, which is the whole answer without a rendered box', () =>
       id: 'history', items: Array(9).fill(0), defaultSize: [6, 2], draw: drawInto(el),
     });
     expect(shown).toBe(itemCapacity('history', 6, 2));
-    expect(shown).toBe(2);
+    expect(shown).toBe(1);
   });
 });
 
@@ -183,6 +187,29 @@ describe('the measured walk', () => {
     });
     expect(shown).toBe(itemCapacity('subway', 4, 4));
     expect(shown).toBe(6);
+  });
+
+  it('counts a row the caller calls clipped as not fitting, though the box holds it', () => {
+    // History's shallow card: the box has room for four rows, but the third one
+    // drawn is cut short by its clamp, so the walk stops at two.
+    const el = measurable({ clientHeight: 500, rowPx: 10, size: [4, 4] });
+    const shown = fitList(el, {
+      id: 'news', items: Array(30).fill(0), measure: true, squeeze: true,
+      clipped: (b) => b.n >= 3, draw: drawInto(el),
+    });
+    expect(shown).toBe(2);
+    // ...and it sheds through it too: an estimate of four comes down to two.
+    const shed = measurable({ clientHeight: 500, rowPx: 10, size: [4, 4] });
+    expect(fitList(shed, {
+      id: 'news', items: Array(30).fill(0), measure: true, clipped: (b) => b.n >= 3, draw: drawInto(shed),
+    })).toBe(2);
+  });
+
+  it('never sheds the last row for a clip, any more than for an overflow', () => {
+    const el = measurable({ clientHeight: 500, rowPx: 10, size: [4, 4] });
+    expect(fitList(el, {
+      id: 'news', items: Array(30).fill(0), measure: true, clipped: () => true, draw: drawInto(el),
+    })).toBe(1);
   });
 
   it('tolerates exactly the slack it is given (F1 ships with one pixel)', () => {
@@ -354,5 +381,116 @@ describe('F1 shrinks its two standings columns together', () => {
     f1.render(body, { drivers, teams }, {});
     expect(cols(body)).toEqual([4, 4]);
     card.remove();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// History on a shallow card: whole events only. An event may take two lines,
+// any event its clamp would cut is shed from the tail, and a lone survivor may
+// take three. happy-dom has no layout, so the line boxes are derived from the
+// text: PER_LINE characters to a 25px line (the measured 22px row at 3x2), and
+// a clamped text box reports its unclamped height as scrollHeight, as the
+// browser's does.
+// ---------------------------------------------------------------------------
+describe('history keeps whole events on a shallow card', () => {
+  const LINE = 25;
+  const GAP = 10;
+  const BODY = 122; // the measured h=2 body
+  const PER_LINE = 30;
+  const lines = (t) => Math.max(1, Math.ceil(t.textContent.length / PER_LINE));
+  const clampOf = (t) => (t.closest('.history--single') ? 3 : 2);
+  beforeEach(() => {
+    // .history__text is a <span>; happy-dom keeps these getters further up
+    // the chain, so shadowing them here and deleting the shadow restores it.
+    Object.defineProperty(HTMLSpanElement.prototype, 'clientHeight', {
+      configurable: true,
+      get() { return this.classList.contains('history__text') ? Math.min(lines(this), clampOf(this)) * LINE : 0; },
+    });
+    Object.defineProperty(HTMLSpanElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() { return this.classList.contains('history__text') ? lines(this) * LINE : 0; },
+    });
+  });
+  afterEach(() => {
+    delete HTMLSpanElement.prototype.clientHeight;
+    delete HTMLSpanElement.prototype.scrollHeight;
+  });
+  const mount = (w, h, clientHeight = BODY) => {
+    const card = mountCard(history, { w, h });
+    const body = card.querySelector('.card__body');
+    measured(body, clientHeight, (el) => {
+      const texts = [...el.querySelectorAll('.history__text')];
+      return texts.reduce((n, t) => n + t.clientHeight, 0) + Math.max(0, texts.length - 1) * GAP;
+    });
+    return { card, body };
+  };
+  const text = (n) => 'x'.repeat(n);
+  const events = (...lens) => ({ events: lens.map((n, i) => ({ year: 1900 + i, text: text(n) })) });
+  const shown = (body) => body.querySelectorAll('.history__item').length;
+  const badge = (card) => card.querySelector('.card__more')?.textContent ?? null;
+
+  it('drops a second event its clamp would cut rather than draw two half-facts', () => {
+    // The demo day at 3x2: the first fact needs three lines, so two events
+    // means two cut ones. One event, given its third line, reads whole.
+    const { card, body } = mount(3, 2);
+    history.render(body, events(68, 84, 85, 64, 76), {});
+    expect(shown(body)).toBe(1);
+    expect(body.querySelector('.history--single')).not.toBeNull();
+    expect(history.cutShort(body)).toBe(false);
+    expect(badge(card)).toBe('+4'); // the corner counts what the measured fit left out
+    card.remove();
+  });
+
+  it('keeps two events when both fit whole in two lines, as the demo does at 6x2', () => {
+    const { card, body } = mount(6, 2);
+    history.render(body, events(55, 60, 90, 40), {});
+    // A third would be cut (90 characters is three lines), so two it is.
+    expect(shown(body)).toBe(2);
+    expect(body.querySelector('.history--single')).toBeNull();
+    expect(history.cutShort(body)).toBe(false);
+    expect(badge(card)).toBe('+2');
+    card.remove();
+  });
+
+  it('grows past its one-event estimate while short facts leave room, and no further', () => {
+    const { card, body } = mount(3, 2);
+    history.render(body, events(20, 20, 20, 20, 20, 20), {});
+    // Three one-line rows take 95px of 122; a fourth (130) would not fit, and
+    // the squeeze's short extra row is never spent here.
+    expect(shown(body)).toBe(3);
+    expect(badge(card)).toBe('+3');
+    card.remove();
+  });
+
+  it('never sheds the last event: a fact too long for three lines keeps its ellipsis', () => {
+    const { card, body } = mount(3, 2);
+    history.render(body, events(120), {});
+    expect(shown(body)).toBe(1);
+    expect(body.querySelector('.history--single')).not.toBeNull();
+    expect(badge(card)).toBeNull();
+    card.remove();
+  });
+
+  it('leaves the medium tier on its estimate, unmeasured', () => {
+    // A 3x3 card whose rows the fake would call cut: nothing sheds, nothing
+    // grows, and no single-event class appears, exactly as before.
+    const { card, body } = mount(3, 3, 60);
+    history.render(body, events(68, 84, 85, 64, 76), {});
+    expect(shown(body)).toBe(itemCapacity('history', 3, 3));
+    expect(body.querySelector('.history--single')).toBeNull();
+    card.remove();
+  });
+
+  it('pins the clamps in the stylesheet: two lines shallow or narrow, three for a lone event', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+    const rule = (selector) => {
+      const at = css.indexOf(`\n${selector} {`);
+      expect(at, `no rule for "${selector}" in main.css`).toBeGreaterThan(-1);
+      return css.slice(at, css.indexOf('}', at));
+    };
+    expect(rule('.card--history.t-narrow .history__text')).toContain('-webkit-line-clamp: 2');
+    expect(rule('.card--history.t-s .history--single .history__text')).toContain('-webkit-line-clamp: 3');
+    // The one-line shallow clamp is gone: it was what cut every event short.
+    expect(css).not.toMatch(/\.card--history\.t-s \.history__text \{[^}]*line-clamp: 1/);
   });
 });

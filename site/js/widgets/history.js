@@ -3,13 +3,20 @@
 
 import { escapeHtml } from '../util.js';
 import { setMoreBadge } from '../card.js';
-import { fitList } from '../capacity.js';
+import { fitList, cardSize, sizeTier } from '../capacity.js';
 import { setExpandSource } from '../expand.js';
 
 // `daily` schedules the refresh against the local calendar (next midnight), not
 // 24h from the last fetch, so a board left on across midnight rolls to the new
 // day's events instead of the nightly reload being the only thing that does.
 export const meta = { id: 'history', title: 'This Day in History', refreshMs: 24 * 60 * 60 * 1000, daily: true };
+
+// Whether any event drawn in the body lost words to its line clamp. A clamped
+// box keeps its unclamped content height as scrollHeight, so a cut row reads
+// taller inside than out; the pixel of tolerance absorbs subpixel rounding.
+// Exported for the fit tests, which drive it on a hand-built body.
+export const cutShort = (body) =>
+  [...body.querySelectorAll('.history__text')].some((t) => t.scrollHeight > t.clientHeight + 1);
 
 export function render(el, vm, _cfg) {
   if (!vm.events?.length) {
@@ -23,13 +30,34 @@ export function render(el, vm, _cfg) {
         <span class="history__text">${escapeHtml(e.text)}</span>
       </div>`;
   const rows = vm.events.map(row);
+  // A shallow card (two rows tall) used to clamp every event to one line so two
+  // of them fit, which drew two half-facts. Now an event may run to two lines,
+  // and the card keeps only the events it can show WHOLE: the fit sheds from the
+  // tail while the body overflows or any event drawn is cut short by its clamp,
+  // then grows back while short facts leave room. A card left with one event
+  // lets it run to three lines (history--single, main.css), and that last event
+  // is never shed, so a fact too long even for three lines is the one place the
+  // ellipsis stays. The medium and tall tiers are untouched: their rows keep
+  // the estimate, unmeasured.
+  //
+  // fitList's squeeze ends by spending leftover room on one more row drawn
+  // short. That row would be an event cut to one line, the half-fact this
+  // replaces, so draw ignores the `squeezed` flag: the extra row is drawn whole,
+  // fails exactly as the grow step's last try did, and comes back off.
+  const shallow = sizeTier(cardSize(el, [6, 2])[1]) === 's';
   // The overflow count rides the corner badge, in the one board-wide form.
   fitList(el, {
     id: meta.id,
     items: rows,
     defaultSize: [6, 2],
+    measure: shallow,
+    squeeze: shallow,
+    clipped: cutShort,
     badge: true,
-    draw: (n) => { el.innerHTML = `<div class="history">${rows.slice(0, n).join('')}</div>`; },
+    draw: (n) => {
+      const single = shallow && n === 1 ? ' history--single' : '';
+      el.innerHTML = `<div class="history${single}">${rows.slice(0, n).join('')}</div>`;
+    },
   });
   // Whole-card tap for the whole day (Sean's pick, mockup A): the grand
   // centered reading list of every event, the card's own rows at reading size.

@@ -1860,6 +1860,16 @@ body.mode-ambient .gear--edit { display: none; }
   display: flex; flex-direction: column; justify-content: flex-start;
   row-gap: var(--well-space, 20px);
 }
+/* The ladder's last resort (subway.js fitStatusBoard): on a morning no rung
+   holds, every well's prose is cut to the same whole number of lines, with an
+   ellipsis, so the wall gives up the tail of a sentence instead of slicing a row
+   of wells through the middle. subway.js stamps --well-clamp with the count it
+   measured. The clamp counts lines across the well's stacked alerts, so a line's
+   second alert is the first thing it takes. */
+.wall__alerts--clamped .sbalert__text {
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  -webkit-line-clamp: var(--well-clamp);
+}
 
 /* Weather: the full meteo board. The other two overlays UNCAP a list; this one
    has no hidden rows to reveal, so it re-reads the same payload at a richness the
@@ -2171,9 +2181,11 @@ body.mode-ambient .gear--edit { display: none; }
 .card--history.t-narrow .history__text {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-/* Shallow: one line per event so a 2nd row fits the 121px body (after the
-   shared rule so it wins the tie when t-s and t-narrow both apply). */
-.card--history.t-s .history__text { -webkit-line-clamp: 1; }
+/* Shallow: an event keeps the two lines above, and history.js measures how many
+   whole events the 122px body holds (two two-line events take 110px). A card
+   left with a single event gives it a third line; history.js marks that case
+   with history--single. */
+.card--history.t-s .history--single .history__text { -webkit-line-clamp: 3; }
 /* Air & Sky measured variants (nth-of-type counts ALL div siblings of .sky:
    .sky__stats is div #1, sky rows start at #2).
    Shallow (h<=2): compact dials, sunrise row only. */

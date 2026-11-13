@@ -45,7 +45,10 @@ describe('itemCapacity', () => {
     expect(itemCapacity('lirr', 4, 4)).toBe(5);
     expect(itemCapacity('lirr', 4, 6)).toBe(9);
     expect(itemCapacity('subway', 4, 4)).toBe(6); // optimistic pitch; alert days trim to the badge
-    expect(itemCapacity('history', 4, 2)).toBe(2);
+    // Shallow History promises its worst case: a day of long facts shows one
+    // whole event at any width (history.js measures; short facts show more).
+    expect(itemCapacity('history', 4, 2)).toBe(1);
+    expect(itemCapacity('history', 12, 2)).toBe(1);
     expect(itemCapacity('history', 4, 4)).toBe(5);
     expect(itemCapacity('worldclock', 2, 3)).toBe(5);
     expect(itemCapacity('worldclock', 3, 4)).toBe(7);
@@ -223,7 +226,8 @@ describe('capacityLabel', () => {
   });
   it('describes trains and events plainly', () => {
     expect(capacityLabel('lirr', 4, 4, cfg)).toBe('next 5 trains');
-    expect(capacityLabel('history', 4, 2, cfg)).toBe('2 events');
+    expect(capacityLabel('history', 4, 2, cfg)).toBe('1 event'); // singular, never "1 events"
+    expect(capacityLabel('history', 4, 4, cfg)).toBe('5 events');
   });
   it('describes all three news widgets as headlines', () => {
     expect(capacityLabel('news', 4, 4, cfg)).toBe('4 headlines');

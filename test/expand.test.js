@@ -38,6 +38,7 @@ const {
   bandRows,
   alertsAvail,
   wellHeight,
+  wellLines,
   statusLabel,
   STATUS_RULES,
   STATUS_FALLBACK,
@@ -951,6 +952,115 @@ describe('subway adaptive columns', () => {
     expect(new Set(f.seen).size).toBeLessThanOrEqual(ALERT_STEPS.length);
   });
 
+  // ---- the clamp stage, the ladder's last resort ----
+  // A fake whose spill is a function of BOTH things the wall can be drawn at:
+  // the rung and the per-well line clamp statusBoard stamps (null when absent).
+  const clampBody = (spillAt) => {
+    const seen = [];
+    const parse = (html) => ({
+      rung: Number(/data-rung="(\d+)"/.exec(html)?.[1] ?? -1),
+      clamp: /--well-clamp:(\d+)/.exec(html) ? Number(/--well-clamp:(\d+)/.exec(html)[1]) : null,
+    });
+    const el = {
+      innerHTML: '',
+      querySelector(sel) {
+        if (sel !== '.wall__alerts') return null;
+        const { rung, clamp } = parse(el.innerHTML);
+        if (rung < 0) return null;
+        seen.push([rung, clamp]);
+        return { clientHeight: 700, scrollHeight: 700 + spillAt(rung, clamp), dataset: { rung: String(rung) } };
+      },
+    };
+    return { el, seen, now: () => parse(el.innerHTML) };
+  };
+  // Spills at every rung unclamped; at rung 4 (the least-spilling rung) each
+  // line of clamp past `holds` costs the wall 50px.
+  const ladderMiss = (holds) => (rung, clamp) => {
+    if (clamp == null) return [900, 700, 500, 300, 60, 190][rung];
+    return rung === 4 ? Math.max(0, clamp - holds) * 50 : 999;
+  };
+
+  it('clamps every well to the largest whole line count the wall holds when no rung fits', () => {
+    const f = clampBody(ladderMiss(2));
+    f.el.innerHTML = statusBoard(twelve());
+    fitStatusBoard(f.el, twelve());
+    // The rung the ladder settled on is kept, type and all; only the prose gives.
+    expect(f.now()).toEqual({ rung: 4, clamp: 2 });
+    // ...and the wall it leaves is the clamped one, every line still on it.
+    expect(f.el.innerHTML).toContain('wall__alerts--clamped');
+    expect((f.el.innerHTML.match(/class="sbalert"/g) || []).length).toBe(12);
+  });
+
+  it('walks the clamp down one line at a time from the longest well the model prices', () => {
+    const f = clampBody(ladderMiss(2));
+    f.el.innerHTML = statusBoard(twelve());
+    fitStatusBoard(f.el, twelve());
+    const longest = Math.max(...twelve().filter((l) => !l.ok).map((l) => wellLines(l.headers, ALERT_STEPS[4])));
+    const clamps = f.seen.filter(([, c]) => c != null).map(([, c]) => c);
+    // Every clamp it tried, in order, largest first, stopping at the first that holds.
+    expect([...new Set(clamps)]).toEqual(Array.from({ length: longest - 1 }, (_, i) => longest - i));
+  });
+
+  it('keeps the one-line clamp, the least spill, when even that cannot hold the wall', () => {
+    // A well cannot shrink below its bullet frame, so a wall of enough lines
+    // still spills at one line. It keeps the clamp that lost least rather than
+    // building another stage (and every alerting line stays on it).
+    const f = clampBody((rung, clamp) => (clamp == null ? [900, 700, 500, 300, 60, 190][rung] : 10 + clamp * 5));
+    f.el.innerHTML = statusBoard(twelve());
+    fitStatusBoard(f.el, twelve());
+    expect(f.now()).toEqual({ rung: 4, clamp: 1 });
+  });
+
+  it('tries the next-least-spilling rung when the best one still spills at one line', () => {
+    // Sixteen alerting lines, measured on the board's canvas: the two-column
+    // rung (4) spills least unclamped but is still 15px over at a one-line
+    // clamp, because a well cannot shrink below its bullet frame, while the
+    // three-column rung (5) holds at two lines. The wall must not settle for a
+    // sliced row when another rung can hold it.
+    const f = clampBody((rung, clamp) => {
+      if (clamp == null) return [900, 700, 500, 300, 60, 190][rung];
+      if (rung === 4) return 15 + (clamp - 1) * 50;
+      if (rung === 5) return Math.max(0, clamp - 2) * 40;
+      return 999;
+    });
+    f.el.innerHTML = statusBoard(twelve());
+    fitStatusBoard(f.el, twelve());
+    expect(f.now()).toEqual({ rung: 5, clamp: 2 });
+    // Rung 4 was exhausted down to one line before rung 5 got its turn.
+    expect(f.seen).toContainEqual([4, 1]);
+  });
+
+  it('never clamps on a morning the ladder holds, even when it had to measure to find out', () => {
+    const f = clampBody((rung, clamp) => (clamp == null ? [900, 700, 500, 300, 0, 40][rung] : -1));
+    f.el.innerHTML = statusBoard(twelve());
+    fitStatusBoard(f.el, twelve());
+    expect(f.now()).toEqual({ rung: 4, clamp: null });
+    expect(f.seen.some(([, c]) => c != null)).toBe(false);
+    expect(f.el.innerHTML).not.toContain('wall__alerts--clamped');
+  });
+
+  it('stamps the clamp only when asked, and draws every word by default', () => {
+    expect(statusBoard(twelve())).not.toContain('--well-clamp');
+    expect(statusBoard(twelve(), 4)).not.toContain('wall__alerts--clamped');
+    const cut = statusBoard(twelve(), 4, 3);
+    expect(cut).toContain('wall__alerts--clamped');
+    expect(cut).toContain('--well-clamp:3');
+    // Same rung, same type scale: the clamp adds to the rung's css, never replaces it.
+    expect(cut).toContain(ALERT_STEPS[4].css);
+  });
+
+  it('cuts whole lines with an ellipsis in the stylesheet, across a well\'s stacked alerts', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+    const at = css.indexOf('\n.wall__alerts--clamped .sbalert__text {');
+    expect(at, 'no clamp rule for the wall in main.css').toBeGreaterThan(-1);
+    const body = css.slice(at, css.indexOf('}', at));
+    // -webkit-line-clamp only does anything inside a vertical -webkit-box, and
+    // it is set on the TEXT box (not each <p>), so it counts both alerts' lines.
+    for (const decl of ['display: -webkit-box', '-webkit-box-orient: vertical', 'overflow: hidden', '-webkit-line-clamp: var(--well-clamp)']) {
+      expect(body).toContain(decl);
+    }
+  });
+
   it('does nothing at all without a layout engine', () => {
     // Unit tests and the server-side render path have no clientHeight; the
     // static estimate has to stand on its own there.
@@ -1153,9 +1263,10 @@ describe('history card tap', () => {
   const histBoard = (vm, [w, h] = [6, 2]) => mountBoard(history, { rect: { w, h }, vm });
 
   it('taps into the whole day: every event in the grand reading list', () => {
-    const { card } = histBoard(histVm(9)); // a 6x2 card fits two events
+    // Unmeasured (no layout engine), a 6x2 card draws its one-event estimate.
+    const { card } = histBoard(histVm(9));
     expect(card.querySelectorAll('.history__item').length).toBeLessThan(9);
-    expect(card.querySelector('.card__more').textContent).toBe('+7');
+    expect(card.querySelector('.card__more').textContent).toBe('+8');
     card.querySelector('.card__body').click();
     expect(isExpandOpen()).toBe(true);
     expect(overlay().querySelector('.history-board')).not.toBeNull();
@@ -1164,7 +1275,7 @@ describe('history card tap', () => {
   });
 
   it('opens the same day view when every event already fits, with no badge', () => {
-    const { card } = histBoard(histVm(2));
+    const { card } = histBoard(histVm(2), [6, 3]);
     // No count, so no corner: the tap still opens the whole day, silently.
     expect(card.querySelector('.card__more')).toBeNull();
     expect(card.classList.contains('is-expandable')).toBe(true);
