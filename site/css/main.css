@@ -223,11 +223,14 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
      FRONT of the time (flex order) and takes width only on its own row, so
      every time still ends on the same right edge and the fixed hour cell keeps
      the colons on one axis; only the day-crossing row's city gives up the
-     marker's width. Hooked on [data-w="2"]: World Clock is never wider than 4,
-     so .t-narrow is on at every size and cannot single this one out. */
+     marker's width. That row is the tight one (an 18px "+1d" is 30px), so
+     its spacing is trimmed: 6px from the city (the 8px gutter less 2), 4px to
+     the time, which also reads the marker as belonging to the time. Hooked on
+     [data-w="2"]: World Clock is never wider than 4, so .t-narrow is on at
+     every size and cannot single this one out. */
 .card--worldclock[data-w="2"] .wc-row__city { padding-right: 8px; }
 .card--worldclock[data-w="2"] .wc-row__ap { font-size: 18px; color: var(--ink-dim); }
-.card--worldclock[data-w="2"] .wc-row__day { order: 1; width: auto; margin: 0 6px 0 0; }
+.card--worldclock[data-w="2"] .wc-row__day { order: 1; width: auto; margin: 0 4px 0 -2px; }
 .card--worldclock[data-w="2"] .wc-row__day:empty { display: none; }
 .card--worldclock[data-w="2"] .wc-row__time { order: 2; }
 /* Bounded elastic rows, same pattern as markets: gaps absorb slack up to a

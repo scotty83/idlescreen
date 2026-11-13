@@ -1732,6 +1732,58 @@ describe('iptv render', () => {
   });
 });
 
+describe('worldclock rows', () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+  const rows = (vm) => {
+    const host = el();
+    worldclock.render(host, vm, CFG);
+    return [...host.querySelectorAll('.wc-row')];
+  };
+
+  it('sets AM/PM in its own span, keeping the separator Intl wrote', () => {
+    // Newer ICU writes a narrow no-break space before AM/PM, older a plain one;
+    // both must split, and the text must read exactly as it did before.
+    const [nnbsp, plain] = rows([
+      { city: 'London', time: '1:13\u202fPM', dayDiff: 0 },
+      { city: 'Hong Kong', time: '12:13 AM', dayDiff: 1 },
+    ]);
+    expect(nnbsp.querySelector('.wc-row__ap').textContent).toBe('PM');
+    expect(nnbsp.querySelector('.wc-row__time').textContent).toBe('1:13\u202fPM');
+    expect(plain.querySelector('.wc-row__ap').textContent).toBe('AM');
+    expect(plain.querySelector('.wc-row__time').textContent).toBe('12:13 AM');
+    expect(plain.querySelector('.wc-row__hh').textContent).toBe('12');
+  });
+
+  it('renders a 24-hour clock with no AM/PM span', () => {
+    const [row] = rows([{ city: 'London', time: '17:13', dayDiff: 0 }]);
+    expect(row.querySelector('.wc-row__ap')).toBeNull();
+    expect(row.querySelector('.wc-row__time').textContent).toBe('17:13');
+    // And through the real formatter, so a change in Intl output is caught.
+    const live = worldclock.worldTimes(new Date(Date.UTC(2026, 10, 13, 17, 13)), [{ label: 'London', zone: 'Europe/London' }], true);
+    const [r24] = rows(live);
+    expect(r24.querySelector('.wc-row__ap')).toBeNull();
+    expect(r24.querySelector('.wc-row__time').textContent).toBe('17:13');
+  });
+
+  it('gives the 2-wide card its tighter time and an unreserved day marker', () => {
+    const decl = (sel, prop) => {
+      const m = css.match(new RegExp(`${sel.replace(/[.[\]"=()-]/g, (c) => `\\${c}`)}\\s*\\{([^}]*)\\}`));
+      return m && (m[1].match(new RegExp(`(?:^|;)\\s*${prop}:\\s*([^;]+)`)) ?? [])[1]?.trim();
+    };
+    const w2 = '.card--worldclock[data-w="2"]';
+    expect(decl(`${w2} .wc-row__ap`, 'font-size')).toBe('18px');
+    expect(decl(`${w2} .wc-row__ap`, 'color')).toBe('var(--ink-dim)');
+    expect(decl(`${w2} .wc-row__city`, 'padding-right')).toBe('8px');
+    // The marker sits in front of the time and takes width only on its own row.
+    expect(decl(`${w2} .wc-row__day`, 'order')).toBe('1');
+    expect(decl(`${w2} .wc-row__day`, 'width')).toBe('auto');
+    expect(decl(`${w2} .wc-row__day:empty`, 'display')).toBe('none');
+    expect(decl(`${w2} .wc-row__time`, 'order')).toBe('2');
+    // The marker itself holds the 18px tier at every size.
+    expect(decl('.wc-row__day', 'font-size')).toBe('18px');
+  });
+});
+
 describe('amtrak render', () => {
   const now = Math.floor(Date.now() / 1000);
   const vm = {

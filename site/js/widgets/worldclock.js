@@ -163,10 +163,18 @@ export function render(el, vm, cfg) {
           const ci = row.time.indexOf(':');
           const hh = row.time.slice(0, ci);
           const rest = row.time.slice(ci); // ":11 PM"
+          // AM/PM gets its own span so the 2-wide card can set it smaller and
+          // dimmer than the digits (main.css). The separator Intl wrote stays in
+          // the markup as-is (newer ICU writes a narrow no-break space, older a
+          // plain one, hence \s), so every other size renders exactly as
+          // before; a 24-hour clock has no suffix and no span.
+          const sp = rest.search(/\s/);
+          const mm = sp === -1 ? rest : rest.slice(0, sp + 1); // ":11 "
+          const ap = sp === -1 ? '' : rest.slice(sp + 1); // "PM", or ''
           const day = row.dayDiff > 0 ? '+1d' : row.dayDiff < 0 ? '−1d' : '';
           return `<div class="wc-row">
         <span class="wc-row__city">${escapeHtml(row.city)}</span>
-        <span class="wc-row__time"><span class="wc-row__hh">${escapeHtml(hh)}</span>${escapeHtml(rest)}</span>
+        <span class="wc-row__time"><span class="wc-row__hh">${escapeHtml(hh)}</span>${escapeHtml(mm)}${ap ? `<span class="wc-row__ap">${escapeHtml(ap)}</span>` : ''}</span>
         <span class="wc-row__day">${day}</span>
       </div>`;
         })
