@@ -335,7 +335,7 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .wx-trend { display: flex; flex-direction: column; gap: 4px; }
 .wx-trend__row { display: flex; }
 .wx-trend__row > span { flex: 1; min-width: 0; text-align: center; font-size: 18px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.wx-trend__row--hours > span { font-size: 14px; font-weight: 400; color: var(--ink-dim); } /* AA: ink-faint fails below 18px */
+.wx-trend__row--hours > span { font-size: 18px; font-weight: 400; color: var(--ink-dim); } /* AA: ink-faint fails below 18px */
 /* The labels breathe away from the curve above (margin-top) and keep
    guaranteed air from the day chips below (.wx-days' margin-top:auto
    collapses to zero on a full card, landing the labels on the chips).
@@ -348,7 +348,7 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    snow/sleet accent) once a column is worth planning around. */
 /* nowrap: the glyph + number must stay one line whatever the value, or the row
    grows and the measured height budget below goes with it. */
-.wx-trend__row--precip > span { font-size: 15px; font-weight: 400; color: var(--ink-dim); white-space: nowrap; } /* AA: ink-faint fails below 18px */
+.wx-trend__row--precip > span { font-size: 18px; font-weight: 400; color: var(--ink-dim); white-space: nowrap; } /* AA: ink-faint fails below 18px */
 .wx-trend__row--precip > span.wx-pp--wet { color: #7fc8e6; }
 /* Droplet sits on the numerals' optical baseline. Alignment and gap only: the
    glyph is filled with currentColor, so it inherits whichever of the two
@@ -369,10 +369,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    had cost. */
 .wx-days { display: flex; gap: 8px; margin-top: auto; }
 .wx-day { flex: 1; min-width: 0; background: var(--bg-card-2); border-radius: 12px; padding: 10px 4px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.wx-day__name { font-size: 16px; color: var(--ink-dim); }
+.wx-day__name { font-size: 18px; color: var(--ink-dim); }
 .wx-day__ico { width: 26px; height: 26px; }
 .wx-day__hi { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.wx-day__lo { font-size: 15px; color: var(--ink-dim); font-variant-numeric: tabular-nums; } /* AA */
+.wx-day__lo { font-size: 18px; color: var(--ink-dim); font-variant-numeric: tabular-nums; } /* AA */
 
 /* --- wider cards (w >= 5): larger hero + tiles, 8-hour trend, 5 tiles --- */
 .card--weather:not(.t-narrow) .wx-now__temp { font-size: 92px; }
@@ -381,10 +381,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .card--weather:not(.t-narrow) .wx-now__feels { font-size: 20px; }
 .card--weather:not(.t-narrow) .wx-trend__chart { height: 44px; }
 .card--weather:not(.t-narrow) .wx-day { padding: 9px 4px; }
-.card--weather:not(.t-narrow) .wx-day__name { font-size: 17px; }
+.card--weather:not(.t-narrow) .wx-day__name { font-size: 18px; }
 .card--weather:not(.t-narrow) .wx-day__ico { width: 30px; height: 30px; }
 .card--weather:not(.t-narrow) .wx-day__hi { font-size: 24px; }
-.card--weather:not(.t-narrow) .wx-day__lo { font-size: 16px; }
+.card--weather:not(.t-narrow) .wx-day__lo { font-size: 18px; }
 
 /* --- tall cards (h >= 5): scale hero + trend up, even vertical rhythm --- */
 .card--weather.t-l .card__body { justify-content: space-between; }
@@ -397,7 +397,7 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .card--weather.t-l .wx-day__name { font-size: 18px; }
 .card--weather.t-l .wx-day__ico { width: 34px; height: 34px; }
 .card--weather.t-l .wx-day__hi { font-size: 27px; }
-.card--weather.t-l .wx-day__lo { font-size: 17px; }
+.card--weather.t-l .wx-day__lo { font-size: 18px; }
 
 /* --- measured-fit tweaks (resize-fit audit) --- the NWS alert banner adds
    ~41px of height the base tiers don't budget for. At h==4 (t-m) trim the
@@ -415,12 +415,18 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 /* (t-m hero cap removed: Momentum's 84px non-narrow hero out-specified it
    even before the fold — keeping it would shrink the hero post-fold.) */
 .card--weather.t-m:not(.t-narrow) .wx-day { padding: 7px 4px; }
+/* The 18px tier (day names, lows, hour labels) costs the 4-tall card 6px at
+   3x4 and 8px at 6x4; the chips' own padding and gap pay it, not the data.
+   Placed after the rule above so it wins at every width. */
+.card--weather.t-m .wx-day,
+.card--weather.t-m:not(.t-narrow) .wx-day { padding: 5px 4px; gap: 3px; }
 .card--weather.t-l .wx-trend__chart { height: 100px; }
 /* Precip row + NWS banner at h == 5: measured, that is the ONLY tier where the
    extra row does not fit (the wide hero keeps a taller reserve, and h >= 6 has
    slack to spare), so there the row buys its 22px (18px + the trend gap) back
-   from the chart. The renderer marks the banner case with .wx-trend--banner. */
-.card--weather.t-narrow[data-h="5"] .wx-trend--banner .wx-trend__chart { height: 76px; }
+   from the chart, and the 18px hour labels and chip lows another 10px. The
+   renderer marks the banner case with .wx-trend--banner. */
+.card--weather.t-narrow[data-h="5"] .wx-trend--banner .wx-trend__chart { height: 66px; }
 /* Past h == 5 the chart grows with the card instead of leaving the slack to
    pool above the day chips (a 100px chart left ~200px of dead band at h == 8).
    One flat height per height tier, graded by measurement, because gen1 boards
@@ -477,7 +483,7 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
   color: var(--ink); font-variant-numeric: tabular-nums;
 }
 .sf-trend__row--hours { margin-top: 6px; }
-.sf-trend__row--hours > span { font-size: 14px; font-weight: 400; color: var(--ink-dim); } /* AA: ink-faint fails below 18px */
+.sf-trend__row--hours > span { font-size: 18px; font-weight: 400; color: var(--ink-dim); } /* AA: ink-faint fails below 18px */
 /* 42px is the measured legibility floor for a 6-column build; below that the
    curve stops reading as a shape and becomes a smudge. */
 .sf-trend__chart { width: 100%; display: block; flex: 1 1 auto; min-height: 42px; }
@@ -494,10 +500,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    right edge with the readings above it. */
 .sf-foot { display: flex; align-items: baseline; gap: 18px; margin-top: auto; padding-top: 12px; }
 .sf-foot__item { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
-.sf-foot__k { font-size: 17px; color: var(--ink-dim); }
+.sf-foot__k { font-size: 18px; color: var(--ink-dim); }
 .sf-foot__v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.sf-foot__q { font-size: 17px; color: var(--ink-dim); }
-.sf-foot__stamp { margin-left: auto; font-size: 17px; color: var(--ink-dim); white-space: nowrap; }
+.sf-foot__q { font-size: 18px; color: var(--ink-dim); }
+.sf-foot__stamp { margin-left: auto; font-size: 18px; color: var(--ink-dim); white-space: nowrap; }
 
 /* Size variants. h=3 is the floor: hero 65 + two label rows + foot 51 leaves
    the chart its 42px minimum in the 237px body, and every taller card simply
@@ -686,7 +692,7 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .sky__stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .sky__stats--single { grid-template-columns: 1fr; }
 .sky__aqi { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.sky__aqi-head { font-size: 17px; font-weight: 700; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* AA */
+.sky__aqi-head { font-size: 18px; font-weight: 700; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* AA */
 /* Category sits under the number so both get the block's full width */
 .sky__aqi-reading { display: flex; flex-direction: column; min-width: 0; }
 /* The category never wraps under the number — it shrinks then ellipsizes */
@@ -1798,7 +1804,7 @@ body.mode-ambient .gear--edit { display: none; }
 .tile__foot .tile__name { min-width: 0; }
 .tile__closed {
   flex: none;
-  font-family: var(--font-board); font-size: 17px; font-weight: 600;
+  font-family: var(--font-board); font-size: 18px; font-weight: 600;
   letter-spacing: .09em; text-transform: uppercase; line-height: 1;
   color: var(--ink-dim); white-space: nowrap;
 }
@@ -1810,8 +1816,8 @@ body.mode-ambient .gear--edit { display: none; }
 .wall__grid--dense .tile__head { gap: 8px; }
 .wall__grid--dense .tile__pct { font-size: 21px; }
 .wall__grid--dense .tile__chg { font-size: 19px; }
-.wall__grid--dense .tile__name { font-size: 17px; } /* AA: dim, not faint */
-.wall__grid--dense .tile__closed { font-size: 15px; }
+.wall__grid--dense .tile__name { font-size: 18px; } /* AA: dim, not faint */
+.wall__grid--dense .tile__closed { font-size: 18px; }
 /* Shelf tiles: bigger, and led by the friendly name (an index symbol is config
    vocabulary, not reading vocabulary — it goes to the quiet sub-line). */
 .wall__shelf .tile { padding: 18px 24px 20px; gap: 8px; max-height: none; }
@@ -2191,8 +2197,13 @@ body.mode-ambient .gear--edit { display: none; }
 .card--markets.t-s .index__info { display: contents; }
 .card--markets.t-s .index__price { font-size: 22px; text-align: right; }
 .card--markets.t-s .index__name { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card--markets.t-s .delta { font-size: 16px; }
+.card--markets.t-s .delta { font-size: 18px; }
 .card--markets.t-s .spark { height: 20px; width: 100%; min-width: 40px; }
+/* At 3 wide the 18px deltas leave a shallow row too little width: the names
+   ellipsize to "Dow J..." and "S&P 5...". The 40px sparkline is the one thing on
+   the row that is not data, so it goes, and the name takes the freed track. */
+.card--markets.t-s[data-w="3"] .spark { display: none; }
+.card--markets.t-s[data-w="3"] .indexes { grid-template-columns: minmax(0, 1fr) auto auto auto; }
 /* Stacked narrow cards (name over price, ≤4 cols, ≥3 tall): a fixed spark
    crushed the 1fr info column, so the wide price overflowed onto the sparkline
    (3×3 overlap). Give info its own content width instead — the spark fills
@@ -2234,7 +2245,7 @@ body.mode-ambient .gear--edit { display: none; }
 .card--markets .index--closed .delta__pct { position: relative; }
 .card--markets .index__closed {
   position: absolute; right: 0; top: calc(100% + 3px);
-  font-family: var(--font-board); font-size: 17px; font-weight: 600;
+  font-family: var(--font-board); font-size: 18px; font-weight: 600;
   letter-spacing: .09em; text-transform: uppercase; line-height: 1.2;
   color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
@@ -2254,7 +2265,7 @@ body.mode-ambient .gear--edit { display: none; }
    Shallow (h<=2): compact dials, sunrise row only. */
 .card--aqi.t-s .sky { gap: 8px; }
 .card--aqi.t-s .sky__aqi-value { font-size: 36px; }
-.card--aqi.t-s .sky__aqi-label { font-size: 17px; }
+.card--aqi.t-s .sky__aqi-label { font-size: 18px; }
 .card--aqi.t-s .sky__row { font-size: 18px; }
 .card--aqi.t-s .sky__row:nth-of-type(n+3) { display: none; }
 /* 2-wide: half-columns can't hold the categories — stack the stats full
@@ -2262,8 +2273,8 @@ body.mode-ambient .gear--edit { display: none; }
 .card--aqi[data-w="2"] .sky__stats { grid-template-columns: 1fr; }
 .card--aqi[data-w="2"]:not(.t-s) .sky { gap: 8px; }
 .card--aqi[data-w="2"]:not(.t-s) .sky__aqi-value { font-size: 40px; }
-.card--aqi[data-w="2"]:not(.t-s) .sky__aqi-head { font-size: 15px; }
-.card--aqi[data-w="2"]:not(.t-s) .sky__aqi-label { font-size: 17px; }
+.card--aqi[data-w="2"]:not(.t-s) .sky__aqi-head { font-size: 18px; }
+.card--aqi[data-w="2"]:not(.t-s) .sky__aqi-label { font-size: 18px; }
 .card--aqi[data-w="2"][data-h="3"] .sky__row:nth-of-type(n+3) { display: none; }
 /* 2x2 minimum: the two dials fill the whole body — no sky rows; value at
    the 34px primary-data floor */
@@ -2358,7 +2369,7 @@ body.mode-ambient .gear--edit { display: none; }
 /* ---------- PATH ---------- */
 .path-section { display: flex; flex-direction: column; gap: 8px; }
 .path-section + .path-section { margin-top: 8px; }
-.path-section__label { font-size: 17px; font-weight: 700; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; } /* AA */
+.path-section__label { font-size: 18px; font-weight: 700; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; } /* AA */
 .pathdot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
 .pathdot + .pathdot { margin-left: -2px; }
 
@@ -2427,11 +2438,12 @@ body.mode-ambient .gear--edit { display: none; }
 /* ---------- Formula 1 ---------- */
 .f1-next { margin-bottom: 12px; }
 .f1-next__hd { font-size: 22px; font-weight: 600; }
-.f1-next__tag { font-size: 15px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; margin-right: 6px; }
+.f1-next__tag { font-size: 18px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; margin-right: 6px; }
 .f1-next__meta { font-size: 18px; color: var(--ink-dim); margin-top: 2px; }
 .f1-sec { margin-bottom: 12px; }
-/* One intra-card section-label system: 17px/700/0.08em (matches PATH). */
-.f1-sec__h, .f1-col .f1-sec__h { font-size: 17px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); margin-bottom: 6px; font-weight: 700; }
+/* One intra-card section-label system: 18px/700/0.08em (matches PATH), the
+   secondary type tier. */
+.f1-sec__h, .f1-col .f1-sec__h { font-size: 18px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); margin-bottom: 6px; font-weight: 700; }
 .f1-row { display: flex; align-items: center; gap: 7px; font-size: 21px; padding: 3px 0; }
 .f1-pos { width: 24px; text-align: right; color: var(--ink-faint); font-size: 18px; font-variant-numeric: tabular-nums; flex: none; }
 .f1-row--p1 .f1-pos { color: var(--ink); font-weight: 700; } /* amber = warning, not gold */
@@ -2540,7 +2552,7 @@ body.mode-ambient .gear--edit { display: none; }
   color: var(--ink-faint); font-variant-numeric: tabular-nums;
 }
 .f1v-rrow--head { height: 30px; }
-.f1v-rrow--head .f1v-cell { font-size: 17px; letter-spacing: 0.06em; text-transform: uppercase; }
+.f1v-rrow--head .f1v-cell { font-size: 18px; letter-spacing: 0.06em; text-transform: uppercase; }
 /* Fixed, so the times and the gaps make a column rather than a ragged edge. */
 .f1v-gap { flex: none; width: 122px; text-align: right; font-size: 20px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
 .f1v-gap--dnf { color: var(--bad); }
@@ -2598,7 +2610,7 @@ body.mode-ambient .gear--edit { display: none; }
    which is always the larger of the two. Verified in the browser at 3x2, 3x4
    and 3x8; do not widen this gap without re-checking the 3x2 floor, where the
    card has room for one service and nothing to spare. */
-.svc__note { font-size: 17px; color: var(--warn); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.svc__note { font-size: 18px; color: var(--warn); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
 
 /* ---------- the ledger, full screen (Cloud Services + TfL Status) ----------
    Sean's pick 2026-08-01, mockup 6B: a TYPOGRAPHIC ledger, deliberately not the
@@ -2658,10 +2670,10 @@ body.mode-ambient .gear--edit { display: none; }
   padding-bottom: 9px; border-bottom: 1px solid rgba(255, 255, 255, 0.10);
 }
 .ledger__advhead span:first-child {
-  font-size: 15px; letter-spacing: 0.15em; text-transform: uppercase;
+  font-size: 18px; letter-spacing: 0.15em; text-transform: uppercase;
   color: var(--ink-faint); font-weight: 600;
 }
-.ledger__advhead span:last-child { font-size: 15px; color: var(--ink-faint); flex: none; }
+.ledger__advhead span:last-child { font-size: 18px; color: var(--ink-faint); flex: none; }
 .ledger__advrow {
   display: flex; align-items: baseline; justify-content: space-between; gap: 24px;
   padding: 11px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.07);
@@ -2760,7 +2772,7 @@ body.mode-ambient .gear--edit { display: none; }
 /* nowrap: the widget name never wraps to a second line — the corner note
    (min-width 0) shrinks and ellipsizes first on narrow cards */
 .card__title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; white-space: nowrap; }
-.card__asof { font-size: 17px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--ink-dim); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; } /* AA */
+.card__asof { font-size: 18px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--ink-dim); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; } /* AA */
 .card.is-stale .card__asof { visibility: hidden; } /* the amber stale stamp takes over */
 /* The corner badge: pinned at the truncation point (bottom-right) instead of
    costing a list row. Safe at every card width, and .card__stamp is
@@ -3107,9 +3119,10 @@ body.ss-backdrop .cf-dial__svg, .ss-preview.ss-backdrop .cf-dial__svg {
    eyebrow. The old blue-700-UPPERCASE-tracked treatment (4 emphasis channels on
    the least-important element, repeated every row) out-shouted the headline at a
    glance. Labels are stored title-case ("NYT Top Stories") so dropping uppercase
-   reads naturally; --ink-dim keeps both AA-safe at 15px (--ink-faint was 4.49:1). */
-.headline__src { font-size: 15px; font-weight: 600; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.headline__age { font-size: 15px; color: var(--ink-dim); flex: none; }
+   reads naturally. 18px is the secondary type tier (DESIGN.md), and --ink-dim
+   keeps both AA-safe at any size. */
+.headline__src { font-size: 18px; font-weight: 600; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.headline__age { font-size: 18px; color: var(--ink-dim); flex: none; }
 /* The headline is the content — weight 600 makes it the salience winner. */
 .headline__title { font-size: 21px; font-weight: 600; line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; min-width: 0; }
 .card--news.t-s .headline__title, .card--marketsnews.t-s .headline__title, .card--sportsnews.t-s .headline__title, .card--substack.t-s .headline__title, .card--bsky.t-s .headline__title { -webkit-line-clamp: 1; }
@@ -3189,7 +3202,7 @@ body.ss-backdrop .cf-dial__svg, .ss-preview.ss-backdrop .cf-dial__svg {
    spends the height the row already reserves (64px min-height). */
 .team__crest { width: 60px; height: 60px; border-radius: 50%; background: rgba(232, 237, 244, 0.08); flex: none; display: flex; align-items: center; justify-content: center; }
 .team__logo { width: 38px; height: 38px; object-fit: contain; flex: none; }
-.team__last { font-size: 17px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* AA */
+.team__last { font-size: 18px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* AA */
 /* Shallow cards: two compact rows fit (a 3×2 showed just one team over dead
    space) — smaller logo/type, no "Last:" line; the result line carries it. */
 .card--sports.t-s .team { min-height: 0; gap: 10px; }
@@ -3207,11 +3220,11 @@ body.ss-backdrop .cf-dial__svg, .ss-preview.ss-backdrop .cf-dial__svg {
    froze My Teams at 8px gaps — the clamp's 10px floor still fits 3 worst-case
    rows at 3x3.) */
 .card--sports.t-m .team { min-height: 0; gap: 12px; }
-.card--sports.t-m .team__info { line-height: 1.2; }
+.card--sports.t-m .team__info { line-height: 1.15; } /* 1.2 until the 18px last line: three teams then ran 1px past a 3x3 */
 .card--sports.t-m .team__name { font-size: 20px; }
-.card--sports.t-m .team__name small { font-size: 17px; }
+.card--sports.t-m .team__name small { font-size: 18px; }
 .card--sports.t-m .team__line { font-size: 19px; }
-.card--sports.t-m .team__last { font-size: 16px; }
+.card--sports.t-m .team__last { font-size: 18px; }
 
 /* ---------- on-screen keyboard (OSK) ---------- */
 /* Keyboards live on the same 860px left spine as the pane content — the old

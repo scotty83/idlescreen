@@ -208,6 +208,10 @@ describe('capacityLabel', () => {
     // big tier by height OR width
     expect(capacityLabel('weather', 4, 5, cfg)).toBe('8 hourly · 5-day forecast');
     expect(capacityLabel('weather', 5, 4, cfg)).toBe('8 hourly · 5-day forecast');
+    // a tall 3-wide card is big (5 days) but has no room for eight 18px hour
+    // labels, so it draws six
+    expect(capacityLabel('weather', 3, 5, cfg)).toBe('6 hourly · 5-day forecast');
+    expect(capacityLabel('weather', 3, 8, cfg)).toBe('6 hourly · 5-day forecast');
   });
   it('bus label counts buses, not header rows', () => {
     // 3x3 (4 rows): 1 leg = header + 3 arrivals; 2 legs at 4x4 (6 rows) =

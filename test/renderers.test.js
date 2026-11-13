@@ -418,12 +418,38 @@ describe('widget renderers', () => {
       const ys = d.replace(/[ML]/g, ' ').trim().split(/\s+/).map(Number).filter((_, i) => i % 2 === 1);
       return Math.max(...ys) - Math.min(...ys);
     };
-    expect(extentAt(3, 5)).toBeCloseTo(44.25, 1); // 6-degree window (unchanged)
-    expect(extentAt(3, 6)).toBeCloseTo(26.55, 1); // 10
-    expect(extentAt(3, 7)).toBeCloseTo(18.97, 1); // 14
-    expect(extentAt(3, 8)).toBeCloseTo(14.75, 1); // 18
+    // Probed 4 wide: the narrowest card that draws all eight hours (a 3-wide
+    // card draws six, which is a different curve, not a different window).
+    expect(extentAt(4, 5)).toBeCloseTo(44.25, 1); // 6-degree window (unchanged)
+    expect(extentAt(4, 6)).toBeCloseTo(26.55, 1); // 10
+    expect(extentAt(4, 7)).toBeCloseTo(18.97, 1); // 14
+    expect(extentAt(4, 8)).toBeCloseTo(14.75, 1); // 18
     // Width must not move the window: a 12-wide, 5-tall card keeps the default.
-    expect(extentAt(12, 5)).toBeCloseTo(extentAt(3, 5), 1);
+    expect(extentAt(12, 5)).toBeCloseTo(extentAt(4, 5), 1);
+    card.remove();
+  });
+
+  it('weather draws eight hours only from 4 wide, six on every 3-wide card', () => {
+    const card = mountCard(weather);
+    const body = card.querySelector('.card__body');
+    const hoursAt = (w, h) => {
+      applyCardRect(card, { w, h });
+      weather.render(body, DEMO_VMS.weather, CFG);
+      return card.querySelectorAll('.wx-trend__row--hours > span').length;
+    };
+    // 18px hour labels need about 50px; a 3-wide body gives eight columns 49px.
+    expect(hoursAt(3, 4)).toBe(6);
+    expect(hoursAt(3, 5)).toBe(6);
+    expect(hoursAt(3, 8)).toBe(6);
+    expect(hoursAt(4, 4)).toBe(6); // not big: the short tier was always six
+    expect(hoursAt(4, 5)).toBe(8);
+    expect(hoursAt(6, 4)).toBe(8);
+    // Every row of the trend agrees with the hour labels, so the curve and the
+    // precip readings stay one column per hour.
+    applyCardRect(card, { w: 3, h: 5 });
+    weather.render(body, DEMO_VMS.weather, CFG);
+    expect(card.querySelectorAll('.wx-trend__row--precip > span')).toHaveLength(6);
+    expect(card.querySelectorAll('.wx-trend__row:not(.wx-trend__row--hours):not(.wx-trend__row--precip) > span')).toHaveLength(6);
     card.remove();
   });
 

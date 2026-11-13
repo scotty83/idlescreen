@@ -247,10 +247,12 @@ export function capacityLabel(id, w, h, cfg = {}) {
       // so what a resize buys here is resolution, not reach.
       return `${w >= 4 ? 8 : 6} hourly wave heights`;
     case 'weather': {
-      // Must match weather.js render exactly: big = w>=5||h>=5 → 8 hourly/5 days,
-      // else 6 hourly/4 days. (Was hardcoded "2-day" with a mismatched threshold.)
+      // Must match weather.js render exactly: big = w>=5||h>=5 → 5 days, else 4;
+      // 8 hourly only when big AND at least 4 wide (a 3-wide column cannot hold
+      // an 18px hour label), else 6. (Was hardcoded "2-day" with a mismatched
+      // threshold.)
       const big = w >= 5 || h >= 5;
-      return `${big ? 8 : 6} hourly · ${big ? 5 : 4}-day forecast`;
+      return `${big && w >= 4 ? 8 : 6} hourly · ${big ? 5 : 4}-day forecast`;
     }
     default:
       return null;

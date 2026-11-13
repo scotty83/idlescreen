@@ -453,7 +453,12 @@ export function render(el, vm, cfg) {
   const w = Number(card?.dataset.w) || 3;
   const h = Number(card?.dataset.h) || 4;
   const big = w >= 5 || h >= 5;
-  const nHours = big ? 8 : 6;
+  // Eight hours only where eight columns have room. An 18px hour label ("10 AM")
+  // needs about 50px, and a 3-wide body divides into 49px columns, so a tall
+  // 3-wide card wraps every label; it keeps the six it draws at 3x4. From 4
+  // wide (72px columns) the tall card takes all eight. capacity.js's edit-mode
+  // note mirrors this rule.
+  const nHours = big && w >= 4 ? 8 : 6;
   const nDays = big ? 5 : 4;
 
   // Drive the accent from the CURRENT condition.
