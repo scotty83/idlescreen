@@ -8,7 +8,7 @@ import { WORKER_URL } from '../env.js';
 import { escapeHtml, fmtMin, fmtTime } from '../util.js';
 import { setCardNote } from '../card.js';
 import { renderAlertRows } from '../transit-alerts.js';
-import { lineChipPrefix } from '../lines.js';
+import { lineChip, metaLine } from '../lines.js';
 import { fitList } from '../capacity.js';
 import { wireTrainExpand } from '../train-expand.js';
 
@@ -19,11 +19,15 @@ export function render(el, vm, _cfg) {
   // baked into the title (card-consistency contract).
   setCardNote(el, 'Penn Station');
   el.classList.toggle('has-alerts', Boolean(vm.alerts?.length));
-  const row = (t) => `<div class="train">
+  const row = (t) => `<div class="train train--rail">
             <div class="train__min"><span>${fmtMin(t.min)}</span><small>min</small></div>
             <div class="train__info">
               <span class="train__dest">${escapeHtml(t.dest)}</span>
-              <span class="train__line">${lineChipPrefix(t.line)}<span class="train__nb">${fmtTime(t.time)}</span>${t.status ? ` · ${escapeHtml(t.status)}` : ''}</span>
+              <span class="train__line">${metaLine([
+                { html: lineChip(t.line) },
+                { html: fmtTime(t.time), cls: 'train__time' },
+                { html: escapeHtml(t.status) },
+              ])}</span>
             </div>
             ${t.track ? `<span class="train__track">Track ${escapeHtml(t.track)}</span>` : ''}
           </div>`;

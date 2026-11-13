@@ -436,17 +436,26 @@ describe('widget renderers', () => {
   });
 
   it('train meta lines hold the departure time in one no-break token', () => {
-    // At 3 columns the meta line wraps; "9:54" / "AM" must never split, so the
-    // time rides in .train__nb (white-space: nowrap) on every rail-style row.
+    // At 3 columns the meta line wraps; "9:54" / "AM" must never split, and the
+    // separator in front of the time must never be left at the end of a line,
+    // so the time and its dot ride in one .train__nb (white-space: nowrap),
+    // tagged .train__time, on every rail-style row.
     for (const [mod, vm] of [
       [lirr, DEMO_VMS.lirr], [mnr, DEMO_VMS.mnr], [njt, DEMO_VMS.njt],
       [amtrak, DEMO_VMS.amtrak], [ferry, DEMO_VMS.ferry], [pathw, DEMO_VMS.path],
     ]) {
       const host = el();
       mod.render(host, vm, CFG);
-      const nb = host.querySelector('.train__line .train__nb');
+      const nb = host.querySelector('.train__line .train__nb.train__time');
       expect(nb, mod.meta.id).not.toBeNull();
-      expect(nb.textContent, mod.meta.id).toMatch(/^\d{1,2}:\d{2}\s?[AP]M$/);
+      expect(nb.textContent, mod.meta.id).toMatch(/^(· )?\d{1,2}:\d{2}\s?[AP]M$/);
+      // Every token of every meta line is a no-wrap span, and only the first
+      // one in a line goes without a leading separator.
+      for (const line of host.querySelectorAll('.train__line')) {
+        const toks = [...line.children];
+        expect(toks.every((t) => t.classList.contains('train__nb')), mod.meta.id).toBe(true);
+        toks.forEach((t, i) => expect(t.textContent.startsWith('· '), mod.meta.id).toBe(i > 0));
+      }
     }
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
     expect(css).toMatch(/\.train__nb\s*\{\s*white-space:\s*nowrap;\s*\}/);
@@ -1743,10 +1752,46 @@ describe('amtrak render', () => {
     expect(el.textContent).toContain('Northeast Regional');
     expect(el.textContent).toContain('171');
     expect(el.textContent).toContain('Track 7'); // platform shown when present
-    // The platform is one no-break token, like the time beside it.
-    expect([...el.querySelectorAll('.train__nb')].map((s) => s.textContent)).toContain('Track 7');
+    // The platform is the right-column track chip, the same as LIRR and NJ
+    // Transit, not a meta-line token.
+    const rows = [...el.querySelectorAll('.train')];
+    expect(rows[1].querySelector('.train__track').textContent).toBe('Track 7');
+    expect(rows[1].querySelector('.train__line').textContent).not.toContain('Track');
+    expect(rows[0].querySelector('.train__track')).toBeNull(); // no platform yet
     expect(el.querySelector('.talert')).toBeTruthy();
-    expect(el.querySelector('.train__status.is-warn')).toBeTruthy(); // "5 min late"
+    // The status is the meta line's last token: "Acela 2151 · 10:13 AM · 5 min late".
+    const late = rows[1].querySelector('.train__line');
+    expect(late.textContent).toMatch(/^Acela 2151 · \d{1,2}:\d{2}\s?[AP]M · 5 min late$/);
+    expect(late.lastElementChild.querySelector('.train__state.is-warn').textContent).toBe('5 min late');
+  });
+
+  it('tags the clock time and an on-time status, the tokens narrow cards shed', () => {
+    const el = document.createElement('div');
+    amtrak.render(el, vm, { amtrak: { dest: '', alerts: true } });
+    const [onTime, late] = [...el.querySelectorAll('.train__line')];
+    expect(onTime.querySelector('.train__time')).toBeTruthy();
+    expect(onTime.lastElementChild.classList.contains('train__ontime')).toBe(true);
+    expect(onTime.lastElementChild.textContent).toBe('· On time');
+    // A late train's status is news: it is never tagged for shedding.
+    expect(late.querySelector('.train__ontime')).toBeNull();
+    // Route and number lead, so the narrow line is never empty.
+    expect(onTime.firstElementChild.textContent).toBe('Northeast Regional 171');
+    // The narrow rules themselves: only Amtrak sheds, and only these two tokens.
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+    expect(css).toMatch(/\.card--amtrak\.t-narrow \.train__time,\s*\.card--amtrak\.t-narrow \.train__ontime \{ display: none; \}/);
+    expect(css).not.toMatch(/\.card(--(lirr|njt|mnr))?\.t-narrow \.train__time/);
+  });
+
+  it('isOnTime matches the on-time status only', () => {
+    for (const s of ['On time', 'ON TIME', ' On Time ', 'on-time']) expect(amtrak.isOnTime(s), s).toBe(true);
+    for (const s of ['5 min late', 'Cancelled', 'Early', '', null, undefined, 'Not on time']) expect(amtrak.isOnTime(s), String(s)).toBe(false);
+  });
+
+  it('floors the countdown at 1 min like LIRR and Metro-North', () => {
+    const el = document.createElement('div');
+    const leaving = { ...vm.departures[0], t: now + 10 }; // rounds to 0
+    amtrak.render(el, { ...vm, alerts: [], departures: [leaving] }, { amtrak: { dest: '', alerts: true } });
+    expect(el.querySelector('.train__min span').textContent).toBe('1');
   });
 
   it('filters to trains that serve the chosen destination and drops the rest', () => {

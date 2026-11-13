@@ -10,6 +10,7 @@ import { setCardNote } from '../card.js';
 import { WORKER_URL } from '../env.js';
 import { fitList } from '../capacity.js';
 import { wireTrainExpand } from '../train-expand.js';
+import { metaLine } from '../lines.js';
 
 export const meta = { id: 'ferry', title: 'NYC Ferry', refreshMs: 60 * 1000 };
 
@@ -46,7 +47,7 @@ export function render(el, vm, _cfg) {
             <div class="train__min"><span>${fmtMin(d.min)}</span><small>min</small></div>
             <div class="train__info">
               <span class="train__dest">${chip}${escapeHtml(d.dest)}</span>
-              <span class="train__line">${d.route ? `${escapeHtml(d.route.name)} · ` : ''}<span class="train__nb">${fmtTime(d.t)}</span></span>
+              <span class="train__line">${metaLine([{ html: d.route ? escapeHtml(d.route.name) : '' }, { html: fmtTime(d.t), cls: 'train__time' }])}</span>
             </div>
           </div>`;
   };

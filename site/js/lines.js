@@ -73,10 +73,18 @@ export function lineChip(name) {
   return `<b class="train__linechip" style="background:${c.bg};color:${c.ink}">${escapeHtml(c.label ?? line)}</b>`;
 }
 
-// The line segment of a departure's meta line, separator included — the
-// separator belongs to the chip, so a nameless branch reads "8:46 PM" instead
-// of the stray " · 8:46 PM" the old template produced.
-export function lineChipPrefix(name) {
-  const chip = lineChip(name);
-  return chip ? `${chip} · ` : '';
+// A departure's meta line (origin tag, line chip, clock time, status) as
+// tokens that wrap WHOLE. Each token is its own no-wrap span and carries the
+// separator in front of it, so a narrow card can only break the line between
+// "· token" units: the old template let the dot ride at the end of a line and
+// the time drop to the next ("[Port Washington] ·" over "9:54 AM"). Empty
+// tokens drop out with their separator, so a nameless branch still reads
+// "8:46 PM" rather than "· 8:46 PM". `cls` tags a token for the size-tier rules
+// in main.css (train__time is the clock time Amtrak sheds on narrow cards).
+// Token html is the caller's, already escaped.
+export function metaLine(tokens) {
+  return tokens
+    .filter((t) => t?.html)
+    .map((t, i) => `<span class="train__nb${t.cls ? ` ${t.cls}` : ''}">${i ? '· ' : ''}${t.html}</span>`)
+    .join(' ');
 }

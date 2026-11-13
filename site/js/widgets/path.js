@@ -7,6 +7,7 @@ import { escapeHtml, fmtMin, fmtTime } from '../util.js';
 import { setCardNote } from '../card.js';
 import { WORKER_URL } from '../env.js';
 import { fitList, cardSize, sizeTier } from '../capacity.js';
+import { metaLine } from '../lines.js';
 
 export const meta = { id: 'path', title: 'PATH', refreshMs: 60 * 1000 };
 
@@ -68,7 +69,7 @@ export function render(el, vm, _cfg) {
         <span class="train__dest">${r.colors
           .map((c) => `<i class="pathdot" style="background:#${c}"></i>`)
           .join('')}${escapeHtml(r.dest)}</span>
-        <span class="train__line">${dirShort ? `${dirShort} · ` : ''}<span class="train__nb">${fmtTime(r.t)}</span></span>
+        <span class="train__line">${metaLine([{ html: dirShort ?? '' }, { html: fmtTime(r.t), cls: 'train__time' }])}</span>
       </div>
     </div>`;
   // Shallow cards can't afford section headers: flatten both directions into

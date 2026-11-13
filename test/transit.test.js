@@ -4,7 +4,7 @@ import { decodeGtfsRt } from '../site/js/gtfs.js';
 import { mapSubwayStatus, SUBWAY_LINES } from '../site/js/widgets/subway.js';
 import { mapLirr, trainNumFromTripId, ROUTE_NAMES, TT_BRANCH_NAMES, PENN_STOP_ID } from '../site/js/widgets/lirr.js';
 import { mapMnr, GCT_STOP_ID, ROUTE_NAMES as MNR_ROUTES } from '../site/js/widgets/mnr.js';
-import { LINE_COLORS, lineChip, lineChipPrefix } from '../site/js/lines.js';
+import { LINE_COLORS, lineChip, metaLine } from '../site/js/lines.js';
 import { NJT_LINES } from '../site/js/config.js';
 import { mapPath, PATH_STATIONS } from '../site/js/widgets/path.js';
 import { mapFerry } from '../site/js/widgets/ferry.js';
@@ -560,7 +560,7 @@ describe('transit line chips (lines.js)', () => {
   it('renders nothing at all for a missing branch name', () => {
     for (const empty of ['', '   ', null, undefined]) {
       expect(lineChip(empty)).toBe('');
-      expect(lineChipPrefix(empty)).toBe('');
+      expect(metaLine([{ html: lineChip(empty) }])).toBe('');
     }
   });
 
@@ -572,8 +572,31 @@ describe('transit line chips (lines.js)', () => {
     expect(hostile).not.toContain('"');
   });
 
-  it('owns the separator, so a nameless branch never renders a stray " · "', () => {
-    expect(lineChipPrefix('Hudson')).toBe(`${lineChip('Hudson')} · `);
-    expect(lineChipPrefix('Shore Line East')).toBe('Shore Line East · ');
+  // This file runs without a DOM, so the markup is read as a string: `text`
+  // strips the tags the way textContent would.
+  const text = (html) => html.replace(/<[^>]+>/g, '');
+
+  it('metaLine gives every token after the first its own leading separator', () => {
+    // The dot lives INSIDE the token's no-wrap span, so a wrapped line can only
+    // break before "· 9:54 AM", never between the dot and the time.
+    const html = metaLine([{ html: lineChip('Hudson') }, { html: '9:54 AM', cls: 'train__time' }, { html: 'BOARDING' }]);
+    expect(html).toBe(
+      `<span class="train__nb">${lineChip('Hudson')}</span> `
+      + '<span class="train__nb train__time">· 9:54 AM</span> '
+      + '<span class="train__nb">· BOARDING</span>',
+    );
+    expect(text(html)).toBe('Hudson · 9:54 AM · BOARDING');
+    // Break opportunities are the plain spaces BETWEEN spans; no token ends on
+    // a dot, so no wrap can strand one.
+    expect(html).not.toMatch(/·\s*<\/span>/);
+  });
+
+  it('metaLine drops empty tokens with their separators', () => {
+    // A nameless branch reads "8:46 PM", not "· 8:46 PM"; a missing status
+    // leaves no trailing dot.
+    expect(metaLine([{ html: lineChip('') }, { html: '8:46 PM' }, { html: '' }, null]))
+      .toBe('<span class="train__nb">8:46 PM</span>');
+    expect(text(metaLine([{ html: 'Shore Line East' }, { html: '8:46 PM' }]))).toBe('Shore Line East · 8:46 PM');
+    expect(metaLine([])).toBe('');
   });
 });

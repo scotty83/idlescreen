@@ -200,9 +200,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .wc-row__hh { display: inline-block; width: 2ch; text-align: right; }
 /* day-offset badge: 0-width by default; the row reserves a real gutter only
    when some city crosses a day boundary (.wc-has-day), so the time never moves */
-/* Day offset is information, not a warning — quiet dim, and 15px meets the type floor. */
-.wc-row__day { flex: none; width: 0; overflow: hidden; font-size: 15px; color: var(--ink-dim); font-weight: 600; text-align: left; transform: translateY(-2px); }
-.wc-has-day .wc-row__day { width: 30px; margin-left: 4px; }
+/* Day offset is information, not a warning: quiet dim, at the 18px secondary
+   floor. The gutter fits the wider of "+1d" and "−1d" at that size. */
+.wc-row__day { flex: none; width: 0; overflow: hidden; font-size: 18px; color: var(--ink-dim); font-weight: 600; text-align: left; transform: translateY(-2px); }
+.wc-has-day .wc-row__day { width: 36px; margin-left: 4px; }
 /* Shallow cards (h=2, legal since 2026-08-01 — see MIN_ALTS): three cities fit
    where the full-size row fits two. The row is FIXED at 28px rather than left to
    its line boxes, because this is the one size where the fit is exact and a
@@ -213,6 +214,22 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    28px row + the 10px gap floor = the 38 in capacity.js. Keep them together. */
 .card--worldclock.t-s .wc-row { min-height: 0; height: 28px; }
 .card--worldclock.t-s .wc-row__time { font-size: 21px; }
+/* 2 columns wide, the time side gives the city its room back (the city keeps
+   the 20px floor; at 2 wide it used to truncate three of five demo cities):
+   - AM/PM drops to the 18px secondary tier in --ink-dim, the digits stay 23px
+     full ink, so the number is still what the eye lands on.
+   - the city's right gutter goes 12px to 8px.
+   - the day gutter is no longer reserved on every row. The marker moves in
+     FRONT of the time (flex order) and takes width only on its own row, so
+     every time still ends on the same right edge and the fixed hour cell keeps
+     the colons on one axis; only the day-crossing row's city gives up the
+     marker's width. Hooked on [data-w="2"]: World Clock is never wider than 4,
+     so .t-narrow is on at every size and cannot single this one out. */
+.card--worldclock[data-w="2"] .wc-row__city { padding-right: 8px; }
+.card--worldclock[data-w="2"] .wc-row__ap { font-size: 18px; color: var(--ink-dim); }
+.card--worldclock[data-w="2"] .wc-row__day { order: 1; width: auto; margin: 0 6px 0 0; }
+.card--worldclock[data-w="2"] .wc-row__day:empty { display: none; }
+.card--worldclock[data-w="2"] .wc-row__time { order: 2; }
 /* Bounded elastic rows, same pattern as markets: gaps absorb slack up to a
    cap, then the list centers. --n stamped by the renderer. --wcrow is the
    WORST-CASE row height (overshooting it only leaves centered air; undershooting
@@ -596,30 +613,34 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .train__info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .train__dest { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .train__line { font-size: 20px; color: var(--ink-dim); }
-/* One meta-line token that must read whole: the departure time, Amtrak's
-   "Track N". The line may still wrap at 3 columns, between tokens only, so
-   "9:54" and "AM" never land on separate lines. */
+/* One meta-line token that must read whole (lines.js metaLine): the line
+   chip, the departure time, a status. Each token carries the "· " in front of
+   it, so the line may still wrap at 3 columns but only between "· token"
+   units: "9:54" and "AM" never split, and a dot never ends a line. */
 .train__nb { white-space: nowrap; }
 /* LIRR / Metro-North line name as a filled signage chip in the MTA's official
-   line color (background and ink both come from lines.js, per line). 17px text
-   on an 18px line box + 2px padding = a 22px chip, which fits inside the meta
-   line's natural 24px box: audited rows measure 51px with and without the chip
-   at every supported size, so no card loses a row to it. vertical-align stays
+   line color (background and ink both come from lines.js, per line). 18px text
+   (the secondary tier's floor) on a 20px line box + 1px padding = a 22px chip,
+   which fits inside the meta line's natural 24px box: audited rows measure the
+   same with and without the chip at every supported size, so no card loses a
+   row to it. vertical-align stays
    at baseline on purpose — that lands the chip's own text baseline on the
    "· 8:46 PM" baseline exactly (measured 0.00px off) and keeps doing so on the
    board's taller CiscoSansTT metrics, which a px nudge would not. Deliberately
    no height pin on .train__line: at 3 columns the meta line wraps, and pinning
    the box there clips the departure time. */
 .train__linechip {
-  display: inline-block; padding: 2px 9px; border-radius: 6px;
-  font-size: 17px; font-weight: 600; line-height: 18px;
+  display: inline-block; padding: 1px 9px; border-radius: 6px;
+  font-size: 18px; font-weight: 600; line-height: 20px;
   vertical-align: baseline; margin-right: 3px;
 }
 .train__track { background: var(--bg-card-2); border-radius: 8px; padding: 6px 10px; font-size: 20px; color: var(--accent); white-space: nowrap; }
-/* Amtrak status pill (right column): on-time neutral, delays warn, cancelled bad. */
-.train__status { align-self: center; font-size: 18px; color: var(--ink-dim); white-space: nowrap; }
-.train__status.is-warn { color: var(--warn); }
-.train__status.is-bad { color: var(--bad); }
+/* Amtrak's status is the meta line's last token (amtrak.js): it inherits the
+   line's 20px --ink-dim, so "On time" reads like NJ Transit's "BOARDING", and
+   only late and cancelled take a color. The separator sits outside this span,
+   so the dot stays dim. */
+.train__state.is-warn { color: var(--warn); }
+.train__state.is-bad { color: var(--bad); }
 
 /* ---------- art card ---------- */
 .artwork { display: flex; flex-direction: column; height: 100%; gap: 10px; }
@@ -2247,9 +2268,47 @@ body.mode-ambient .gear--edit { display: none; }
 .card--aqi[data-w="2"].t-s .sky__row { display: none; }
 /* Art at its smallest (shallow + narrow): caption reduces to the title */
 .card--art.t-s.t-narrow .artwork__artist { display: none; }
-/* Transit rows tighten when narrow */
-.card.t-narrow .train__track { padding: 4px 8px; font-size: 17px; }
-.card.t-narrow .train__linechip { padding: 1px 7px; font-size: 15px; }
+/* Transit rows tighten when narrow. Both chips hold the 18px secondary floor;
+   the narrow saving is horizontal padding only. */
+.card.t-narrow .train__track { padding: 4px 8px; font-size: 18px; }
+.card.t-narrow .train__linechip { padding: 1px 7px; }
+/* Narrow rail rows (3-4 columns): the track chip rides the DESTINATION line, so
+   the meta line gets the row's whole width and stays one line. At 3 wide the
+   meta line used to share its width with the right-hand track column and wrap
+   ("[Port Washington] · 9:54 AM" in 202px), which made rows three lines tall
+   and left a 3x2 card showing one train in room for two. The row becomes a
+   3-column grid and .train__info dissolves (display: contents, as
+   .card--markets.t-s .index__info already ships):
+
+     [ 8 min ]  Port Washington .......... [Track 17]
+                [Port Washington] · 9:54 AM
+
+   The destination ellipsizes before the chip. Spacing moves from gaps to
+   margins, so a row without a track gives the empty third column zero width,
+   and .train's own 16px gap must be zeroed or it becomes a row-gap between the
+   two lines. The chip's vertical padding drops to 2px so it fits the
+   destination's line box and the row keeps its two-line height. Scoped to
+   .train--rail (LIRR, NJ Transit, Metro-North, Amtrak): PATH, Ferry and bus
+   rows have no track and keep their flex rows. */
+.card.t-narrow .train--rail {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0;
+  align-items: center;
+}
+.card.t-narrow .train--rail .train__min { grid-column: 1; grid-row: 1 / span 2; margin-right: 16px; }
+.card.t-narrow .train--rail .train__info { display: contents; }
+.card.t-narrow .train--rail .train__dest { grid-column: 2; grid-row: 1; min-width: 0; }
+.card.t-narrow .train--rail .train__line { grid-column: 2 / 4; grid-row: 2; }
+.card.t-narrow .train--rail .train__track { grid-column: 3; grid-row: 1; margin-left: 10px; padding: 2px 8px; }
+/* Amtrak on narrow cards sheds two meta tokens (amtrak.js tags them): the
+   clock time, because the route and number already name the train and the big
+   minutes say when, and an on-time status, which is not news. The common row is
+   "Northeast Regional 171" alone; a late train reads "Acela 2151 · 5 min late".
+   Each separator lives inside its token, so nothing dangles. The tap view and
+   5+ wide cards keep both. */
+.card--amtrak.t-narrow .train__time,
+.card--amtrak.t-narrow .train__ontime { display: none; }
 
 
 /* ---------- transit service alerts ---------- */

@@ -10,10 +10,15 @@ import { WORKER_URL } from '../env.js';
 import { renderAlertRows } from '../transit-alerts.js';
 import { fitList } from '../capacity.js';
 import { wireTrainExpand } from '../train-expand.js';
+import { metaLine } from '../lines.js';
 
 export const meta = { id: 'amtrak', title: 'Amtrak', refreshMs: 60 * 1000 };
 
 const statusClass = (s) => (/cancel/i.test(s) ? 'is-bad' : /(late|delay)/i.test(s) ? 'is-warn' : '');
+// "On time" is the one status that is not news. Narrow cards drop it (main.css
+// .card--amtrak.t-narrow .train__ontime), so a 3-wide row reads
+// "Northeast Regional 171" and only a late or cancelled train spends the room.
+export const isOnTime = (s) => /^\s*on[\s-]*time\s*$/i.test(s ?? '');
 
 export function render(el, vm, cfg) {
   // No destination picked yet (fetchData sets the flag): prompt instead of an
@@ -46,16 +51,31 @@ export function render(el, vm, cfg) {
   el.classList.toggle('has-alerts', Boolean(alerts.length));
 
   const row = (d) => {
-    const min = Math.max(0, Math.round((d.t - nowSec) / 60));
+    // Floors at 1 like LIRR and Metro-North: a train still on the board reads
+    // "1 min", never "0 min". (NJ Transit keeps its 0: a train past its
+    // scheduled minute is still boarding there.)
+    const min = Math.max(1, Math.round((d.t - nowSec) / 60));
     const primary = dest ? `Arrives ${fmtTime(d.arr)}` : escapeHtml(d.dest);
-    const line = `${escapeHtml(d.route)} ${escapeHtml(d.num)} · <span class="train__nb">${fmtTime(d.t)}</span>${d.platform ? ` · <span class="train__nb">Track ${escapeHtml(d.platform)}</span>` : ''}`;
-    return `<div class="train">
+    // Same grammar as the other rail boards: the track is the right-column
+    // chip, the status is the meta line's last token. Narrow cards shed the
+    // clock time and an on-time status (main.css), since the route and number
+    // already name the train and the big minutes say when; the tap view and
+    // wider cards keep both.
+    const line = metaLine([
+      { html: `${escapeHtml(d.route)} ${escapeHtml(d.num)}`.trim() },
+      { html: fmtTime(d.t), cls: 'train__time' },
+      {
+        html: d.status ? `<span class="train__state ${statusClass(d.status)}">${escapeHtml(d.status)}</span>` : '',
+        cls: isOnTime(d.status) ? 'train__ontime' : '',
+      },
+    ]);
+    return `<div class="train train--rail">
       <div class="train__min"><span>${fmtMin(min)}</span><small>min</small></div>
       <div class="train__info">
         <span class="train__dest">${primary}</span>
         <span class="train__line">${line}</span>
       </div>
-      ${d.status ? `<span class="train__status ${statusClass(d.status)}">${escapeHtml(d.status)}</span>` : ''}
+      ${d.platform ? `<span class="train__track">Track ${escapeHtml(d.platform)}</span>` : ''}
     </div>`;
   };
 
