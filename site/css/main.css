@@ -2762,7 +2762,6 @@ body.mode-ambient .gear--edit { display: none; }
 .tfl__name { font-size: 21px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tfl__status { font-size: 19px; color: var(--ink-dim); white-space: nowrap; flex: none; }
 .tfl--alert .tfl__status { color: var(--warn); font-weight: 600; }
-.tfl--tap { cursor: pointer; }
 /* TfL's half of the shared full-screen ledger above: the line colour, at the
    reading scale that surface is set in (the card's dot is 14px against 21px
    type). Same ring as the card's, so an almost-black line still reads as a

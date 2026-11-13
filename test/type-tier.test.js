@@ -26,11 +26,6 @@ const ALLOWED = [
   // Glyph-only marks: a live dot, a warning triangle, a line bullet. They carry
   // no words, so the tier does not apply.
   [/__livedot|\.tennis-row__live|__icon\b|\.bullet/, 'glyph-only marks'],
-  // LANES OWNED BY OTHER BATCH C BRANCHES (train rows, world clock, the
-  // screensaver strip, slide captions). Each brings its own lane to the tier;
-  // once those branches are merged into dev, delete this entry and the test
-  // must still pass.
-  [/\.train|\.wc-row|\.card--worldclock|\.strip|\.slide-caption/, 'TEMPORARY: lanes owned by other batch C branches'],
 ];
 
 // Every innermost rule as { selectors, body }, comments stripped, @media and
@@ -86,12 +81,12 @@ describe('the 18px type tier', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('keeps every exception for a reason, and the temporary lanes are the only lanes', () => {
+  it('keeps every exception for a reason, with no temporary ones left', () => {
     // A reason per entry, so a future exception has to say why it is one.
     for (const [re, why] of ALLOWED) {
       expect(re).toBeInstanceOf(RegExp);
       expect(why.length).toBeGreaterThan(8);
     }
-    expect(ALLOWED.filter(([, why]) => why.startsWith('TEMPORARY'))).toHaveLength(1);
+    expect(ALLOWED.filter(([, why]) => why.startsWith('TEMPORARY'))).toHaveLength(0);
   });
 });
