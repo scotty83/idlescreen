@@ -1335,10 +1335,16 @@ body.mode-ambient .gear--edit { display: none; }
 /* A typing field (city, ticker, station, handle, name) gets a visible well so a
    standing user can see where the keys land. The fixed-length --pin codes keep
    their bare display. 860px is the pane's spine (.rows, .row, .osk). Typed text
-   wraps, even a run with no spaces in it, and is never clipped. */
+   wraps, even a run with no spaces in it, and is never clipped.
+   The well makes the text's vertical position visible, so it takes the
+   metric-pinned face on a pinned 64px line (see 'RB Centred'): the caps sit in
+   the middle of each line on whatever font the device has. On the bare line box
+   the board's face rode about 3px high (Sean, on the board). 64px line + the
+   2px borders = the 68px the well already was, so no keyboard moves. */
 .code__display:not(.code__display--pin) {
   background: var(--bg-card); border: 2px solid rgba(255, 255, 255, 0.3); border-radius: 12px;
   padding: 0 20px; box-sizing: border-box; max-width: 860px; overflow-wrap: break-word;
+  font-family: var(--font-centred); line-height: 64px; min-height: 68px;
 }
 .key {
   min-height: 64px; font-size: 26px; font-weight: 600;

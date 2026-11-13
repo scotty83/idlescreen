@@ -576,7 +576,7 @@ function wirePhotoCodeEntry(src, status) {
   const paint = () => {
     host.innerHTML = `<output class="osk__display code__display--pin" aria-live="polite">${code.padEnd(6, '·')}</output>`
       + qwertyKeypad('ABCDEFGHJKMNPQRSTVWXYZ0123456789', [],
-        '<button class="key osk__key osk__key--wide" data-key="⌫">⌫</button>');
+        '<button class="key osk__key osk__key--wide" data-key="⌫">⌫</button>', { back: false });
     host.querySelectorAll('[data-key]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         const k = btn.dataset.key;
@@ -616,7 +616,7 @@ function wireVideoCodeEntry(status) {
   const paint = () => {
     host.innerHTML = `<output class="osk__display code__display--pin" aria-live="polite">${code.padEnd(6, '\u00b7')}</output>`
       + qwertyKeypad('ABCDEFGHJKMNPQRSTVWXYZ0123456789', [],
-        '<button class="key osk__key osk__key--wide" data-key="\u232b">\u232b</button>');
+        '<button class="key osk__key osk__key--wide" data-key="\u232b">\u232b</button>', { back: false });
     host.querySelectorAll('[data-key]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         const k = btn.dataset.key;
@@ -931,8 +931,7 @@ async function renderCitibike() {
           : `<button class="btn picklist__item" data-add="${s.id}" data-name="${escapeHtml(s.name)}">${escapeHtml(s.name)}</button>`))
         .join('') || (query.trim().length >= 2 ? '<span class="pane__empty">No matches</span>' : '')}</div>
       ${chosen.length < 6
-        ? qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [' ', '-', '/'],
-          '<button class="key osk__key" data-key="⌫">⌫</button>')
+        ? qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [' ', '-', '/'], '')
         : '<p class="pane__hint">Max 6; remove one to add another.</p>'}`;
     pane().querySelectorAll('[data-remove]').forEach((c) =>
       c.addEventListener('click', () => { state.cfg.citibike.stations = chosen.filter((_, i) => i !== Number(c.dataset.remove)); draw(); }));
@@ -958,21 +957,31 @@ async function renderCitibike() {
 // appear (setup codes have no I/L/O/U on purpose). Reuses the photos
 // keyboard's .osk row/key styles so every on-board keyboard reads the same.
 const QWERTY_ROWS = ['1234567890', 'QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
-export function qwertyKeypad(alphabet, extraKeys, actionsHtml, { lower = false, shift = null } = {}) {
+export function qwertyKeypad(alphabet, extraKeys, actionsHtml, { lower = false, shift = null, back = true } = {}) {
   const allowed = new Set(alphabet);
   const rows = QWERTY_ROWS.map((r) => [...r].filter((k) => allowed.has(k)))
     .filter((r) => r.length); // digit-less alphabets (the name pad) drop the empty digits row
   rows[rows.length - 1].push(...extraKeys.filter((k) => k !== ' ')); // symbols ride the short bottom row
   // shift === null keeps the classic fixed-case pad (`lower` picks the case).
   // A boolean makes the pad SHIFTABLE: letters render/emit in the shift case
-  // and the bottom letter row gains ⇧ (head) and ⌫ (tail) — the name-pad
-  // layout. Callers own the state and re-render on the Shift key.
+  // and the bottom letter row gains ⇧ at its head. Callers own the state and
+  // re-render on the Shift key.
   const upper = shift === null ? !lower : shift;
   const cased = (k) => (upper ? k : k.toLowerCase());
   const keyHtml = (k) => `<button class="key osk__key" data-key="${cased(k)}">${cased(k)}</button>`;
   const shiftKey = shift === null ? ''
     : `<button class="key osk__key ${shift ? 'is-on' : ''}" data-key="Shift">⇧</button>`;
-  const backKey = shift === null ? '' : '<button class="key osk__key" data-key="⌫">⌫</button>';
+  // ⌫ is the pad's own key on every TYPING keyboard: it closes the bottom
+  // letter row, right of the symbols, so the hand finds it in one place (Sean,
+  // on the board: beside the space bar on the Weather pad it read as misplaced
+  // next to the name pad's). Two exceptions. A bottom row already as wide as the
+  // top row — Markets, whose three symbols fill it to ten keys — has no room for
+  // an eleventh inside the 860px spine, so there ⌫ leads the actions row. And
+  // the fixed-length code pads pass `back: false`: their one wide ⌫ IS the
+  // actions row, and they are not part of this change.
+  const bottom = rows[rows.length - 1];
+  const backKey = back ? '<button class="key osk__key" data-key="⌫">⌫</button>' : '';
+  const backFits = bottom.length + (shiftKey ? 1 : 0) < QWERTY_ROWS[0].length;
   // The space bar is a wide, labeled key (a bare ' ' renders as a blank
   // key-sized button — Sean hit this in the Citi Bike search) and sits on the
   // bottom actions row, the same spot as the greeting-name pad's space bar.
@@ -980,8 +989,8 @@ export function qwertyKeypad(alphabet, extraKeys, actionsHtml, { lower = false, 
     ? '<button class="key osk__key osk__key--space" data-key=" ">space</button>'
     : '';
   return `<div class="osk">${rows
-    .map((row, i) => `<div class="osk__row">${i === rows.length - 1 ? shiftKey : ''}${row.map(keyHtml).join('')}${i === rows.length - 1 ? backKey : ''}</div>`)
-    .join('')}<div class="osk__row">${space}${actionsHtml}</div></div>`;
+    .map((row, i) => `<div class="osk__row">${row === bottom ? shiftKey : ''}${row.map(keyHtml).join('')}${row === bottom && backFits ? backKey : ''}</div>`)
+    .join('')}<div class="osk__row">${space}${backFits ? '' : backKey}${actionsHtml}</div></div>`;
 }
 
 // Company names for the list's second line, borrowed from the last markets
@@ -1028,7 +1037,7 @@ function renderMarkets() {
         <div class="colhead"><h3>Add a ticker</h3><span>${TICKER_MAX - symbols.length} slot${TICKER_MAX - symbols.length === 1 ? '' : 's'} left</span></div>
         <output class="code__display" aria-live="polite"></output>
         ${qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ['^', '.', '-'],
-          '<button class="key osk__key" data-key="⌫">⌫</button><button class="key osk__key osk__key--primary osk__key--wide" data-key="Add">Add</button>')}
+          '<button class="key osk__key osk__key--primary osk__key--wide" data-key="Add">Add</button>')}
         <p class="code__status"></p>
       </div>
     </div>`;
@@ -1498,7 +1507,7 @@ function renderFollowPane(opts) {
     id = '';
     keys.innerHTML = qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ['.', '-'],
       (opts.suffixKey ? `<button class="key osk__key osk__key--wide" data-key="${opts.suffixKey}">·${opts.suffixKey.slice(1)}</button>` : '') +
-      '<button class="key osk__key" data-key="⌫">⌫</button><button class="key osk__key osk__key--wide osk__key--primary" data-key="Check">Check</button>',
+      '<button class="key osk__key osk__key--wide osk__key--primary" data-key="Check">Check</button>',
       { lower: true }); // handles/slugs are lowercase — keys type what they show
     pad.hidden = false;
     display.textContent = '';
@@ -1658,7 +1667,7 @@ function renderWeather() {
         .map((r, i) => `<button class="btn picklist__item" data-pick="${i}">${escapeHtml(r.label)}</button>`)
         .join('')}</div>
       ${qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [' ', '-'],
-        '<button class="key osk__key" data-key="⌫">⌫</button><button class="key osk__key osk__key--primary osk__key--wide" data-key="Search">Search</button>')}
+        '<button class="key osk__key osk__key--primary osk__key--wide" data-key="Search">Search</button>')}
       <p class="code__status${searching ? ' code__status--busy' : ''}">${escapeHtml(status)}</p>
       <p class="pane__hint">Weather, Air &amp; Sky and Surf data by Open-Meteo.com (CC BY 4.0).</p>`;
     pane().querySelectorAll('[data-units]').forEach((btn) =>
@@ -1795,7 +1804,7 @@ function renderCode() {
     <p class="pane__hint">Build your configuration at <b>${location.host}/setup</b> on any device, then enter the 6-character code here.</p>
     <output class="code__display code__display--pin" aria-live="polite">······</output>
     ${qwertyKeypad('ABCDEFGHJKMNPQRSTVWXYZ0123456789', [],
-      '<button class="key osk__key osk__key--wide" data-key="⌫">⌫</button>')}
+      '<button class="key osk__key osk__key--wide" data-key="⌫">⌫</button>', { back: false })}
     <p class="code__status"></p>
     <hr class="pane__rule">
     <p class="pane__hint">Share this board's setup: get a code to write down, then enter it on another board (Settings → Setup code) or at <b>${location.host}/setup</b>.</p>

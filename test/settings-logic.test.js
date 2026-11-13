@@ -266,7 +266,7 @@ describe('/info guide tracks WIDGET_GROUPS', () => {
 
 import { qwertyKeypad } from '../site/js/settings/settings.js';
 describe('qwertyKeypad shiftable variant (replaced keyboard.js)', () => {
-  it('cases keys by shift state and adds ⇧/⌫ to the bottom letter row', () => {
+  it('cases keys by shift state and adds ⇧ to the bottom letter row', () => {
     const up = qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [], '', { shift: true });
     expect(up).toContain('data-key="Shift"');
     expect(up).toContain('data-key="⌫"');
@@ -282,10 +282,42 @@ describe('qwertyKeypad shiftable variant (replaced keyboard.js)', () => {
     expect(html).not.toContain('<div class="osk__row"></div>');
     expect(html).toContain('data-key=" "'); // space bar rides the actions row
   });
-  it('classic fixed-case pads are unchanged (no shift/backspace injected)', () => {
+  it('classic fixed-case pads get no shift key', () => {
     const html = qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ['-'], '<b>x</b>');
     expect(html).not.toContain('data-key="Shift"');
-    expect(html).not.toContain('data-key="⌫"');
+  });
+  // The pad owns ⌫ and puts it in one place: the tail of the bottom letter row,
+  // right of the symbols. Board vet 2026-11-13: beside the space bar on the
+  // Weather pad it read as misplaced next to the name pad's.
+  const rowsOf = (html) => html.split('<div class="osk__row">').slice(1);
+  const BACK = 'data-key="⌫"';
+  it('⌫ closes the bottom letter row on a fixed-case pad, not the actions row', () => {
+    const rows = rowsOf(qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', [' ', '-'], '<b>Search</b>'));
+    const letters = rows[rows.length - 2], actions = rows[rows.length - 1];
+    expect(letters.indexOf(BACK)).toBeGreaterThan(letters.indexOf('data-key="-"'));
+    expect(actions).not.toContain(BACK);
+    expect(actions).toContain('data-key=" "');
+    expect(rows.join('').split(BACK).length - 1).toBe(1); // exactly one ⌫
+  });
+  it('⌫ sits in the same place on the shiftable name pad', () => {
+    const rows = rowsOf(qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ', [' ', '-'], '<b>Done</b>', { shift: false }));
+    const letters = rows[rows.length - 2];
+    expect(letters.indexOf(BACK)).toBeGreaterThan(letters.indexOf('data-key="-"'));
+    expect(rows[rows.length - 1]).not.toContain(BACK);
+  });
+  it('a code pad that brings its own wide ⌫ gets no second one (back: false)', () => {
+    const own = '<button class="key osk__key osk__key--wide" data-key="⌫">⌫</button>';
+    const html = qwertyKeypad('ABCDEFGHJKMNPQRSTVWXYZ0123456789', [], own, { back: false });
+    expect(html.split(BACK).length - 1).toBe(1);
+    expect(rowsOf(html).pop()).toContain('osk__key--wide');
+  });
+  it('a bottom row already ten keys wide (Markets) keeps ⌫ leading the actions row', () => {
+    const rows = rowsOf(qwertyKeypad('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ['^', '.', '-'], '<b>Add</b>'));
+    const letters = rows[rows.length - 2], actions = rows[rows.length - 1];
+    expect(letters).not.toContain(BACK);
+    expect(letters.split('<button').length - 1).toBe(10);
+    expect(actions.indexOf(BACK)).toBeLessThan(actions.indexOf('Add'));
+    expect(actions.indexOf(BACK)).toBeGreaterThan(-1);
   });
 });
 
