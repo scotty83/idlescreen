@@ -9,7 +9,7 @@ import { blockZoomGestures } from './zoomguard.js';
 import { schedule, dailyRefresh } from './scheduler.js';
 import { resolveMode, ambientSource } from './modes.js';
 import { chooseBootConfig, fragmentConfig } from './boot.js';
-import { stripData, stripHtml } from './ambient.js';
+import { stripData, stripHtml, setStripSourceStale, onStripStaleChange } from './ambient.js';
 import { initScreensaver, setMode, isAmbient } from './screensaver.js';
 import { startBeacon, reportWidgetHealth } from './fleet.js';
 import { initTextViewer } from './textviewer.js';
@@ -164,11 +164,15 @@ function startWidget(mod, rect, startDelayMs = 0) {
       // dim the card and stamp its age instead of clearing the stale mark.
       if (vm?.stale) markStale(card, vm.updatedAt);
       else markFresh(card);
+      // The ambient strip follows the card's mark (ambient.js): a stale source
+      // leaves the strip, a fresh one returns. Not set by the boot restore above.
+      setStripSourceStale(mod.meta.id, Boolean(vm?.stale));
       // Health vector (fleet.js): worker-served stale counts, fresh clears.
       reportWidgetHealth(mod.meta.id, vm?.stale ? 'stale' : null);
     } catch (err) {
       reportWidgetHealth(mod.meta.id, 'error');
       markStale(card, cacheAgeOf(loadCache(mod.meta.id, fp)));
+      setStripSourceStale(mod.meta.id, true);
       throw err; // let the scheduler back off
     }
     // Daily widgets refresh at the next local midnight (calendar), not a
@@ -350,6 +354,9 @@ function startRuntime() {
   applyMode();
   cancels.push(schedule(applyMode, 60 * 1000, { jitter: 0 }));
   cancels.push(schedule(renderStrip, 30 * 1000, { jitter: 0 }));
+  // A source flipping stale or fresh redraws the strip at once (renderStrip is
+  // a no-op outside ambient mode), rather than at the next 30 s tick.
+  cancels.push(onStripStaleChange(() => renderStrip()));
   if (!DEMO) {
     startSelfHealing();
     cancels.push(startBeacon(() => cfg));

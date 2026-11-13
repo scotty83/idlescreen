@@ -12,7 +12,7 @@ import { escapeHtml } from './util.js';
 import { isOverlayOpen, registerSurface, whileShown } from './surfaces.js';
 import { markExpandable } from './card.js';
 import { attachGesture } from './gesture.js';
-import { stripData, stripHtml } from './ambient.js';
+import { stripData, stripHtml, onStripStaleChange } from './ambient.js';
 import { loadCache } from './store.js';
 
 // Trimmed field read: whitespace-only is the same as absent for caption purposes
@@ -47,6 +47,87 @@ export function captionHtml(item) {
   if (meta) parts.push(`<span class="slide-caption__meta">${meta}</span>`);
   parts.push(captionDesc(item));
   return parts.filter(Boolean).join('');
+}
+
+// ---------- caption placement (slideshow and full-screen viewer) ----------
+//
+// The caption used to sit at a fixed 48 px from the SCREEN's lower-left corner.
+// Most art is letterboxed on black, and 72 of the 91 works in the art manifest
+// leave a side bar between 48 and 310 px wide, so the plate started on the bar
+// and ended on the picture. Sean's pick (2026-11-13, "use the black bar"):
+// place it from the picture's own rectangle and never half and half. When the
+// bar beside the picture leaves a column wide enough for a wrapped caption,
+// the caption sits wholly in the bar as plain text (black needs no plate);
+// otherwise it sits wholly on the picture, plate inset from the picture's
+// corner and held to the picture's width. Numbers below are CSS px.
+export const CAPTION_LEFT = 48; // today's left, and the floor on the picture
+export const CAPTION_BOTTOM = 82; // today's bottom: clears the 70 px strip by 12
+export const CAPTION_INSET = 24; // plate in from the picture's corner
+export const CAPTION_BAR_MIN = 280; // narrowest column a wrapped caption reads in
+export const CAPTION_BAR_GAP = 32; // air between bar text and the picture
+// 82 plus the plate's 14 px top/bottom padding: plain bar text lands on the
+// same baseline the plate's text has today.
+export const CAPTION_BAR_BOTTOM = 96;
+
+// Pure geometry, so it is testable without a layout engine. Returns null when
+// today's CSS placement should stand: 'cover' (the picture IS the screen), a
+// picture as wide as the box or wider (letterboxed top and bottom, or exact),
+// or a natural size not known yet (a decode still pending or failed), so an
+// unknown picture keeps the familiar spot instead of guessing a wrong one.
+export function captionPlacement({ boxW, boxH, natW, natH, fit = 'contain' } = {}) {
+  if (fit === 'cover' || !(natW > 0) || !(natH > 0) || !(boxW > 0) || !(boxH > 0)) return null;
+  const ar = natW / natH;
+  if (ar >= boxW / boxH) return null;
+  // Contain fit, narrower than the box: full height, centred, bars both sides.
+  const picW = boxH * ar;
+  const picLeft = (boxW - picW) / 2;
+  const room = Math.floor(picLeft - CAPTION_LEFT - CAPTION_BAR_GAP);
+  if (room >= CAPTION_BAR_MIN) {
+    return { bar: true, left: CAPTION_LEFT, bottom: CAPTION_BAR_BOTTOM, maxWidth: room };
+  }
+  const left = Math.round(Math.max(CAPTION_LEFT, picLeft + CAPTION_INSET));
+  // Box-sizing is border-box, so this bounds the plate itself: it ends the same
+  // inset short of the picture's right edge and a long title wraps instead.
+  return { bar: false, left, bottom: CAPTION_BOTTOM, maxWidth: Math.floor(picLeft + picW - CAPTION_INSET - left) };
+}
+
+// Captions placed so far, for the resize re-run: caption element -> the inputs
+// it was placed from. Pruned as captions leave the DOM (the viewer's is removed
+// when a photo has no caption; a rebuilt slideshow replaces its host's).
+const placedCaptions = new Map();
+let resizeWired = false;
+
+function applyPlacement(caption, box, natW, natH, fit) {
+  const p = captionPlacement({ boxW: box.clientWidth, boxH: box.clientHeight, natW, natH, fit });
+  // Inline styles over the CSS defaults, cleared back to them for null. Set in
+  // the same turn as the caption text, and .slide-caption has no transition, so
+  // between two differently shaped slides the plate moves with the text swap
+  // and never slides across the glass.
+  caption.classList.toggle('slide-caption--bar', Boolean(p?.bar));
+  caption.style.left = p ? `${p.left}px` : '';
+  caption.style.bottom = p ? `${p.bottom}px` : '';
+  caption.style.maxWidth = p ? `${p.maxWidth}px` : '';
+}
+
+// Place `caption` against the picture shown in `box` (the fixed, full-screen
+// host: the slideshow or the viewer). natW/natH come from the decoded image.
+// One layout read per call (the box size), once per slide or photo.
+export function placeCaption(caption, box, natW, natH, fit = 'contain') {
+  if (!caption || !box) return;
+  // Prune here too, not only on resize: a board that never resizes would
+  // otherwise keep every caption element a rebuilt slideshow left behind.
+  for (const cap of placedCaptions.keys()) if (!cap.isConnected) placedCaptions.delete(cap);
+  placedCaptions.set(caption, { box, natW, natH, fit });
+  applyPlacement(caption, box, natW, natH, fit);
+  if (!resizeWired && typeof window !== 'undefined') {
+    resizeWired = true;
+    window.addEventListener('resize', () => {
+      for (const [cap, s] of placedCaptions) {
+        if (!cap.isConnected) placedCaptions.delete(cap);
+        else applyPlacement(cap, s.box, s.natW, s.natH, s.fit);
+      }
+    });
+  }
 }
 
 // Ready-to-paint promise for an image.  decode() is the real guarantee (the
@@ -265,6 +346,8 @@ export function clearImageCard(el) {
 }
 
 let stripTimer = null;
+let stripUnsub = null; // the open viewer's stale-flip subscription (ambient.js)
+let viewerFit = 'contain'; // this session's fit, which caption placement reads
 let viewerList = null; // photo list for the open viewer session
 let viewerCaption = true; // whether this session shows captions at all (chart: false)
 let viewerIndex = -1;
@@ -277,7 +360,10 @@ let userStepped = false; // guards against clobbering a swipe with deferred stat
 // there is text to show, remove it the moment there isn't. Presence follows
 // content, so swiping from a captioned artwork to an untitled photo can't
 // strand an empty box, and swiping back brings the box straight back.
-function renderViewerCaption(viewer, item) {
+//
+// `img` supplies the natural size that places it (placeCaption). Until it is
+// known (the opening photo still loading) the caption keeps the default spot.
+function renderViewerCaption(viewer, item, img = null) {
   const html = viewerCaption ? captionHtml(item) : '';
   let cap = viewer.querySelector('.slide-caption');
   if (!html) {
@@ -292,6 +378,7 @@ function renderViewerCaption(viewer, item) {
     viewer.insertBefore(cap, viewer.querySelector('.strip'));
   }
   cap.innerHTML = html;
+  placeCaption(cap, viewer, img?.naturalWidth, img?.naturalHeight, viewerFit);
 }
 
 // Built once below and thereafter toggled, so `hidden` is the signal.
@@ -331,6 +418,8 @@ export function openImageViewer(current, cfg, { list = [], caption = true, strip
       onTap: () => {
         viewer.hidden = true;
         clearInterval(stripTimer);
+        stripUnsub?.();
+        stripUnsub = null;
         viewerList = null; // release the album; reopen passes a fresh list
         ++viewerNav; // a swipe still decoding when the viewer closes is void
       },
@@ -339,15 +428,20 @@ export function openImageViewer(current, cfg, { list = [], caption = true, strip
   }
   // Per-open, not per-element: the shared viewer is reused by every image card.
   viewer.classList.toggle('art-viewer--fill', fit === 'cover');
+  viewerFit = fit;
   viewer.innerHTML = `
     <img class="art-viewer__img" src="${escapeHtml(current.img)}" alt="${escapeHtml(current.title ?? '')}">
     ${strip ? '<div class="strip"></div>' : ''}`;
   viewerCaption = caption;
-  renderViewerCaption(viewer, current);
   const stripEl = viewer.querySelector('.strip');
   clearInterval(stripTimer);
   stripTimer = null;
+  stripUnsub?.();
+  stripUnsub = null;
   if (stripEl) {
+    // stripData reads the dashboard's shared stale state (ambient.js), so this
+    // band drops a stale source exactly as the screensaver's does, and a flip
+    // while the viewer is up redraws it at once.
     const refreshStrip = () => {
       const caches = {};
       for (const id of ['weather', 'lirr', 'mnr', 'njt']) caches[id] = loadCache(id)?.data;
@@ -355,11 +449,25 @@ export function openImageViewer(current, cfg, { list = [], caption = true, strip
     };
     refreshStrip();
     stripTimer = setInterval(refreshStrip, 30 * 1000);
+    stripUnsub = onStripStaleChange(refreshStrip);
   }
   // Seed the session list synchronously — no fetch here; callers pass the list.
   viewerList = Array.isArray(list) ? list : [];
   viewerIndex = viewerList.findIndex((a) => a.img === current.img);
   viewer.hidden = false;
+  // The caption is placed against the box, so only once the viewer is shown
+  // (a hidden box measures 0). The opening photo was usually decoded by the
+  // card a moment ago and is already complete; when it is not, the caption
+  // holds the default spot until it loads, and a swipe that lands first wins.
+  const imgEl = viewer.querySelector('.art-viewer__img');
+  renderViewerCaption(viewer, current, imgEl.complete && imgEl.naturalWidth > 0 ? imgEl : null);
+  if (!(imgEl.complete && imgEl.naturalWidth > 0)) {
+    const nav = viewerNav;
+    imgEl.addEventListener('load', () => {
+      if (nav !== viewerNav || viewer.hidden) return;
+      renderViewerCaption(viewer, current, imgEl);
+    }, { once: true });
+  }
   warmNeighbors();
 }
 
@@ -411,12 +519,13 @@ function step(viewer, dir) {
   // The one swipe grammar (swipeFadeThrough): the photo dims at the gesture,
   // the src/caption swap happens in the dark, and the new photo rises. The
   // decode rides the dark beat; neighbors are pre-warmed so it rarely waits.
-  swipeFadeThrough(imgEl, loadImage(new Image(), item.img), () => {
+  const probe = new Image(); // decoded off-glass; its natural size places the caption
+  swipeFadeThrough(imgEl, loadImage(probe, item.img), () => {
     if (gen !== viewerGen || nav !== viewerNav || viewer.hidden) return;
     if (viewer.querySelector('.art-viewer__img') !== imgEl) return;
     imgEl.src = item.img;
     imgEl.alt = item.title ?? '';
-    renderViewerCaption(viewer, item);
+    renderViewerCaption(viewer, item, probe);
     warmNeighbors();
   });
 }
@@ -482,7 +591,8 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     return manifest[order[pos]];
   }
 
-  function show(item, instant = false) {
+  // `img` is the decoded preload, whose natural size places the caption.
+  function show(item, instant = false, img = null) {
     const next = layers[1 - active];
     const out = layers[active];
     // A swiped change flips INSTANTLY — it happens in the dark, mid
@@ -504,17 +614,22 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     // leaves this element with no children at all, which `:empty` hides so the
     // padded background box never shows as a stray grey rectangle.
     caption.innerHTML = captionHtml(item);
+    // Placed with the text swap, from the picture now on the glass. A failed
+    // decode has no natural size and falls back to the default spot.
+    placeCaption(caption, host, img?.naturalWidth, img?.naturalHeight, fit);
   }
 
   // Decode before the crossfade starts, so the incoming layer is a finished
   // picture the moment it becomes visible (a broken URL resolves too; the
   // background-image will retry). A failed decode (`ok === false`) is usually an
   // expired signed URL — tell the caller so it can renew the manifest before the
-  // next advance hits another dead link.
+  // next advance hits another dead link. The decoded Image goes to `done` too:
+  // its natural size is what places the caption.
   function preload(item, done) {
-    loadImage(new Image(), item.img).then((ok) => {
+    const img = new Image();
+    loadImage(img, item.img).then((ok) => {
       if (!ok) onImageError?.(item);
-      done(ok);
+      done(ok, img);
     });
   }
 
@@ -523,13 +638,13 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
     const mine = ++gen;
     const item = itemAt(pos);
     pos += 1;
-    preload(item, () => {
+    preload(item, (ok, img) => {
       // stop() during an in-flight preload must not resurrect the loop, and a
       // later advance or swipe (which bumped `gen`) supersedes this one: an
       // outdated completion that showed its item and scheduled its own timer
       // would leave a second rotation chain running alongside the winner.
       if (stopped || mine !== gen) return;
-      show(item);
+      show(item, false, img);
       clearTimeout(timer);
       timer = setTimeout(() => advance(), intervalMs);
     });
@@ -564,12 +679,13 @@ export function createSlideshow(manifest, host, { intervalMs = 75000, random = M
         item = manifest[order[pos]];
         pos += 1;
       }
-      const ready = new Promise((res) => preload(item, res));
+      let decoded = null;
+      const ready = new Promise((res) => preload(item, (ok, img) => { decoded = img; res(ok); }));
       swipeFadeThrough(host, ready, () => {
         // A second swipe (or an auto advance) that started after this one owns
         // the chain now; only the latest gesture shows and re-arms the timer.
         if (stopped || mine !== gen) return;
-        show(item, true);
+        show(item, true, decoded);
         clearTimeout(timer);
         timer = setTimeout(() => advance(), intervalMs);
       });

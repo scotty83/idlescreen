@@ -789,7 +789,11 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
      measured off the same viewport bottom now: 82px clears the band's 70px by
      12px. It was tuned in the .art-viewer, which has always been viewport-fixed
      — in the ambient slideshow, which was not, the band ate the bottom 28px of
-     this box on every board until the .ambient fix above. */
+     this box on every board until the .ambient fix above. These are the
+     DEFAULTS (cover fit, a picture as wide as the screen, a size not yet
+     known); a letterboxed picture gets inline left/bottom/max-width from
+     imageshow.js placeCaption, set with the text swap. No transition here, so
+     the plate never slides between two differently shaped slides. */
   position: absolute; left: 48px; bottom: 82px;
   display: flex; flex-direction: column; gap: 4px;
   background: rgba(0, 0, 0, 0.55);
@@ -804,6 +808,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
    engine without `:has()` would drop the whole rule and un-hide that
    placeholder — the wrong way to fail on a board we can't upgrade. */
 .slide-caption:empty { display: none; }
+/* In the black bar beside a narrow picture (imageshow.js captionPlacement):
+   plain text on black, so the plate goes. left/bottom/max-width are set inline
+   from the picture's rectangle; the text keeps the plate's sizes and inks. */
+.slide-caption--bar { background: none; padding: 0; border-radius: 0; }
 .slide-caption__title { font-size: 24px; font-weight: 600; }
 .slide-caption__meta { font-size: 21px; color: var(--ink-dim); }
 .slide-caption__desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 8px; font-size: 22px; line-height: 1.35; color: var(--ink-dim); max-width: 70ch; }

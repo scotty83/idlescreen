@@ -4,6 +4,44 @@
 
 import { escapeHtml, fmtMin } from './util.js';
 
+// Which strip sources the dashboard currently holds stale: the same state as
+// the card's markStale/markFresh (a fetch that threw, a worker-served stale
+// copy, LIRR's own old-feed rule), set by main.js beside those calls. A stale
+// source leaves the strip rather than showing an old number with no mark on
+// it (Sean's pick, 2026-11-13). The card can afford to dim and stamp its age;
+// a one-line band read in passing cannot.
+//
+// It lives here, not in main.js, because three hosts render the strip (the
+// screensaver, the tap-opened art viewer, the settings preview) and all three
+// already import this module; stripData reads it by default, so none of them
+// can drift onto a second notion of "stale".
+//
+// Deliberately NOT set by the boot-time restore from cache: the card is dimmed
+// then too, but those values are usually minutes old and the first fetch
+// settles within seconds. Counting it would leave the strip clock-only after
+// every reload (the nightly one included) until the next 30 s tick.
+const staleSources = new Set();
+const staleListeners = new Set();
+
+export function setStripSourceStale(id, stale) {
+  if (staleSources.has(id) === Boolean(stale)) return;
+  if (stale) staleSources.add(id);
+  else staleSources.delete(id);
+  // A flip re-renders at once, so a segment leaves (or comes back) with the
+  // card's own mark instead of up to 30 s later.
+  for (const fn of staleListeners) fn(id, Boolean(stale));
+}
+
+export function isStripSourceStale(id) {
+  return staleSources.has(id);
+}
+
+// Subscribe to stale/fresh flips; returns the unsubscribe.
+export function onStripStaleChange(fn) {
+  staleListeners.add(fn);
+  return () => staleListeners.delete(fn);
+}
+
 // Pick the next STILL-UPCOMING departure and recompute its countdown from the
 // absolute departure time.
 //
@@ -29,8 +67,11 @@ function nextUpcoming(list, timeKey, nowSec) {
   return null;
 }
 
-export function stripData(caches, cfg, { nowSec = Math.floor(Date.now() / 1000) } = {}) {
-  const enabled = new Set(cfg.widgets);
+// `isStale` defaults to the shared registry above; tests pass their own.
+export function stripData(caches, cfg, { nowSec = Math.floor(Date.now() / 1000), isStale = isStripSourceStale } = {}) {
+  // A stale source contributes nothing, exactly as if it were switched off:
+  // with every source stale the strip is the clock alone.
+  const enabled = new Set((cfg.widgets ?? []).filter((id) => !isStale(id)));
   // The weather VM stores canonical Fahrenheit and converts at the card's
   // render; the strip must convert too or a °C board shows Fahrenheit here.
   const rawF = enabled.has('weather') && caches.weather ? caches.weather.now?.temp ?? null : null;
