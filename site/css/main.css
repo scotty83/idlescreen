@@ -7,6 +7,13 @@
      2026-07-19): native RoomOS neutrals per Cisco's Webex Frame — pure-black
      canvas, #121212 surfaces, white-alpha .11 tiles/wells/hairlines. */
   --bg: #000;
+  /* Full-screen tap views (the +N overlay, the story and text viewers). A
+     neutral near-black with the luminance of the navy it replaced
+     (rgb(13, 17, 23), Y 0.0055): every translucent tile, rule and wash inside
+     those views was tuned against that lightness, so they keep their contrast
+     and only the blue cast goes. The text viewer's scrim restates it at 0.96
+     as a literal, since the board's engine has no colour-mix to derive it. */
+  --bg-view: rgb(17, 17, 17);
   --bg-card: #121212;
   --bg-card-2: rgba(255, 255, 255, 0.11);
   --ink: rgba(255, 255, 255, 0.95);
@@ -1585,7 +1592,7 @@ body.mode-ambient .gear--edit { display: none; }
 /* ---------- full-screen text viewer (tap truncated text) ---------- */
 .text-viewer {
   position: fixed; inset: 0; z-index: 46; /* above the art viewer's 45 */
-  background: rgba(13, 17, 23, 0.96);
+  background: rgba(17, 17, 17, 0.96); /* --bg-view at 0.96: keep the two in step */
   display: flex; justify-content: center;
   /* SAFE centring, and the two declarations are deliberate. Plain `center`
      overflows a too-tall panel equally past BOTH edges, and the top half is
@@ -1667,12 +1674,12 @@ body.mode-ambient .gear--edit { display: none; }
    overlay is not lifted; only idle contexts are. */
 .expand {
   position: fixed; inset: 0; z-index: 44;
-  /* The story view's scrim colour, taken OPAQUE: the tiles below are themselves
+  /* The story view's scrim colour (--bg-view), taken OPAQUE: the tiles below are themselves
      translucent (--bg-card-2), so at the story view's 0.96 the numbers on the
      card you just tapped ghost through the numbers in the overlay — unreadable
      on a data surface, and not what the approved mockup shows (it composited
      over black). A text panel can afford the see-through; a full canvas can't. */
-  background: rgb(13, 17, 23);
+  background: var(--bg-view);
   display: flex; flex-direction: column;
   padding: 56px 72px 0;
   cursor: pointer;
@@ -1905,15 +1912,19 @@ body.mode-ambient .gear--edit { display: none; }
    words visibly high in the pill, because line-height centring follows the
    font's ascent and descent and CiscoSansTT's differ from the desktop
    fallback's. Both halves are needed — pinning the metrics under a line-height
-   construction still leaves the label a pixel high. */
+   construction still leaves the label a pixel high.
+   The proportion stops at the 18px secondary tier: 0.74em of the 24px and 20px
+   rungs would be 17.8px and 14.8px, so those rungs pin the pill at 18px
+   (--well-sfs, set by subway.js's ladder) and the 20px rungs shorten the box to
+   24px (--well-sh) so it still sits inside their 26.8px line box. */
 .sbstatus {
   display: inline-flex; align-items: center; justify-content: center;
   margin-right: 0.6em; padding: 0 0.65em;
-  height: 1.5em; line-height: 1; vertical-align: 0.1em;
+  height: var(--well-sh, 1.5em); line-height: 1; vertical-align: 0.1em;
   border-radius: 999px;
   background: var(--warn-tint); color: var(--warn);
   font-family: var(--font-centred);
-  font-size: 0.74em; font-weight: 600; letter-spacing: 0.06em;
+  font-size: var(--well-sfs, 0.74em); font-weight: 600; letter-spacing: 0.06em;
   text-transform: uppercase; white-space: nowrap;
 }
 /* Adaptive columns: past the single-column ceiling the wells flow into two, and
@@ -2137,7 +2148,7 @@ body.mode-ambient .gear--edit { display: none; }
 .sff__nowtag {
   position: absolute; top: 0; transform: translateX(-50%);
   font-size: 19px; font-weight: 700; letter-spacing: 0.1em; color: var(--ink-mid);
-  background: rgb(13, 17, 23); padding: 0 9px;
+  background: var(--bg-view); padding: 0 9px; /* masks the hairline: must be the backdrop */
 }
 .sff__nightlbl {
   position: absolute; bottom: 6px; transform: translateX(-50%);

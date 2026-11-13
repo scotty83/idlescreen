@@ -32,7 +32,7 @@ Calm utility. Quiet, glanceable, professional — information first, zero flash.
 
 ## Accessibility & Inclusion
 
-- 55" 4K panel at 1920×1080 logical, viewed at 3–6 ft: hard floor of 20 px text, primary data ≥ 34 px, muted tints ≥ 4.5:1 contrast on card backgrounds.
+- 55" 4K panel at 1920×1080 logical, viewed at 3–6 ft: primary text ≥ 20 px with an 18 px floor for secondary meta text, primary data ≥ 34 px, muted tints ≥ 4.5:1 contrast on card backgrounds.
 - Touch targets ≥ 56 px on the settings surfaces (standing user, arm's length).
 - Color is never the only signal (route letters inside bullets, ▲/▼ plus sign on market deltas).
 - Reduced-motion users: crossfades are the only animation; all are removable via prefers-reduced-motion without losing content.

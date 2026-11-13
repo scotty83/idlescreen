@@ -15,6 +15,7 @@ stays neutral.
 | Token | Value | Role |
 |---|---|---|
 | `--bg` | `#000` | page canvas (OLED black) |
+| `--bg-view` | `rgb(17,17,17)` | full-screen tap views; the story/text viewer scrim restates it at .96 |
 | `--bg-card` | `#121212` | card surface |
 | `--bg-card-2` | `rgba(255,255,255,.11)` | tiles, wells, tracks, hairlines |
 | `--ink` | `rgba(255,255,255,.95)` | primary text, key data |
@@ -37,8 +38,10 @@ clear `#e3b341`); MTA line-bullet palette is authentic and non-negotiable
 'Segoe UI', Roboto, …` fallback. One family, weights 400/600/700.
 Fixed px scale tuned for 3–6 ft viewing (1 px ≈ 0.64 mm):
 
-- Floor: **20 px** — nothing smaller anywhere (a handful of 12–19 px micro-badges
-  excepted, never prose).
+- Primary text and data: **20 px** or larger.
+- Secondary tier: **18 px** for meta text (hour labels, percents, lows, source and
+  age, as-of stamps, last-game lines, deltas). Nothing a user reads is under
+  18 px; glyph-only marks (line bullets, warning icons, live dots) are excepted.
 - Card titles: 20 px 600 uppercase, +0.08em tracking, `--ink-dim`.
 - Body/rows: 20–26 px. Greeting 40/600 −0.01em; topbar clock 48/700.
 - Primary glance data: 34 px (train minutes) → 54–92 px (AQI, current temp);
@@ -100,8 +103,8 @@ become cuts.
   `--bg-card-2` fill; accordion groups via `grid-template-rows 0fr↔1fr`; custom
   6 px white scroll thumb (RoomOS idiom); drill-down lists with obvious back.
 - **Full-screen viewers** (art, chart, tapped-headline story view): `fixed inset:0`,
-  `rgba(13,17,23,.96)` backdrop, centered panel, "Tap anywhere to close", 20 s idle
-  auto-dismiss — EXCEPT the image viewer, which is tap-to-close only by design
+  `--bg-view` backdrop (`rgba(17,17,17,.96)` for the story/text scrim), centered
+  panel, "Tap anywhere to close", 20 s idle auto-dismiss — EXCEPT the image viewer, which is tap-to-close only by design
   (2026-08-01: a tapped-open photo may be meant to stay up; no idle timer, ever).
   Story view: source/age meta, 46/700 headline, 30 px summary, white
   QR card (QR must sit on white) to read the article on a phone.

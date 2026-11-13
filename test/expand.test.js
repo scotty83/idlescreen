@@ -863,6 +863,28 @@ describe('subway adaptive columns', () => {
     expect(ALERT_STEPS[ALERT_STEPS.length - 1].css).toContain('--well-fs:20px');
   });
 
+  it('never sets the status pill under the 18px tier, and prices the bigger pill', () => {
+    const px = (css, v) => Number((css.match(new RegExp(`${v}:(\\d+)px`)) ?? [])[1]);
+    for (const step of ALERT_STEPS) {
+      const fs = px(step.css, '--well-fs') || 30; // main.css holds the top rung's 30px
+      const pill = px(step.css, '--well-sfs') || 0.74 * fs;
+      expect(pill).toBeGreaterThanOrEqual(18);
+      // The pill's box must stay inside the copy's 1.34 line box, or it costs
+      // the well height the model never priced.
+      const box = px(step.css, '--well-sh') || 1.5 * pill;
+      expect(box).toBeLessThanOrEqual(1.34 * fs);
+    }
+    // An 18px pill on 20px copy is wider than the plain price; the rungs that
+    // pin it say so, and the model charges the lead header for it.
+    const [, , , , twenty] = ALERT_STEPS;
+    expect(twenty.pill).toBeGreaterThan(1);
+    // A header no rule matches wears SERVICE ALERT: 13 characters + 3 = 16 plain.
+    const header = 'x'.repeat(64);
+    expect(statusLabel(header)).toBe(STATUS_FALLBACK);
+    expect(wellLines([header], { ...twenty, pill: 1 })).toBe(1); // 64 + 16 fills the 80 exactly
+    expect(wellLines([header], twenty)).toBe(2); // 64 + 16 x 1.25 does not
+  });
+
   it('deals the wells into two real columns, config order down the first', () => {
     // Each column is its own wrapper — the split is structural now, not a grid
     // auto-flow, so the DOM says outright which well sits where.

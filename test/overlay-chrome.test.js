@@ -181,9 +181,11 @@ describe('font-metric-independent boxed labels', () => {
     expect(decl('.sbstatus', 'align-items')).toBe('center');
     expect(decl('.sbstatus', 'justify-content')).toBe('center');
     expect(decl('.sbstatus', 'font-family')).toBe('var(--font-centred)');
-    // The box the alert-type ladder was measured against is unchanged.
-    expect(decl('.sbstatus', 'height')).toBe('1.5em');
-    expect(decl('.sbstatus', 'font-size')).toBe('0.74em');
+    // The box the alert-type ladder was measured against is unchanged, as the
+    // default: the rungs whose 0.74em would fall under 18px override it (see the
+    // 18px-tier test beside the ladder in expand.test.js).
+    expect(decl('.sbstatus', 'height')).toBe('var(--well-sh, 1.5em)');
+    expect(decl('.sbstatus', 'font-size')).toBe('var(--well-sfs, 0.74em)');
     expect(decl('.sbstatus', 'vertical-align')).toBe('0.1em');
   });
 

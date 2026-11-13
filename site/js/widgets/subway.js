@@ -80,7 +80,9 @@ const ALERT_GAP = 20;
 // that scale browser-measured — `chars` the alert copy that fits one line at
 // this size in a column of this count, `line` the line box, `para` the gap
 // between a line's stacked headers, `pad` the well's top+bottom padding,
-// `bullet` its bullet. Model and render therefore cannot drift apart.
+// `bullet` its bullet, and `pill` (where present) what the status pill costs
+// against its plain price (see pillChars). Model and render therefore cannot
+// drift apart.
 export const ALERT_STEPS = [
   { cols: 1, chars: 115, line: 41, para: 9, pad: 40, bullet: 80, css: '' },
   { cols: 2, chars: 50, line: 41, para: 9, pad: 40, bullet: 80, css: '' },
@@ -90,11 +92,11 @@ export const ALERT_STEPS = [
   },
   {
     cols: 2, chars: 65, line: 33, para: 8, pad: 32, bullet: 60,
-    css: '--well-fs:24px;--well-bullet:60px;--well-bfs:32px;--well-pad:16px;--well-px:24px;--well-gap:22px;--well-para:8px;',
+    css: '--well-fs:24px;--well-bullet:60px;--well-bfs:32px;--well-pad:16px;--well-px:24px;--well-gap:22px;--well-para:8px;--well-sfs:18px;',
   },
   {
-    cols: 2, chars: 80, line: 28, para: 7, pad: 24, bullet: 48,
-    css: '--well-fs:20px;--well-bullet:48px;--well-bfs:26px;--well-pad:12px;--well-px:20px;--well-gap:18px;--well-para:7px;',
+    cols: 2, chars: 80, line: 28, para: 7, pad: 24, bullet: 48, pill: 1.25,
+    css: '--well-fs:20px;--well-bullet:48px;--well-bfs:26px;--well-pad:12px;--well-px:20px;--well-gap:18px;--well-para:7px;--well-sfs:18px;--well-sh:24px;',
   },
   // Same 20px scale as the rung above, one more column. Browser-measured on the
   // 1776px canvas the same way the rungs above it were: two columns give the
@@ -103,8 +105,8 @@ export const ALERT_STEPS = [
   // would say 52). That is the same 47 the two-column 30px rung measures — the
   // column narrows by a third exactly as the type does.
   {
-    cols: 3, chars: 47, line: 28, para: 7, pad: 24, bullet: 48,
-    css: '--well-fs:20px;--well-bullet:48px;--well-bfs:26px;--well-pad:12px;--well-px:20px;--well-gap:18px;--well-para:7px;',
+    cols: 3, chars: 47, line: 28, para: 7, pad: 24, bullet: 48, pill: 1.25,
+    css: '--well-fs:20px;--well-bullet:48px;--well-bfs:26px;--well-pad:12px;--well-px:20px;--well-gap:18px;--well-para:7px;--well-sfs:18px;--well-sh:24px;',
   },
 ];
 
@@ -155,8 +157,16 @@ export function statusLabel(header) {
 // with the pill in front of it, and the model has to answer 3 for both.
 // Charging it inside the ceiling costs nothing when the lead is not near a
 // boundary — ceil((113+10)/80) and ceil(113/80) are the same two lines.
+//
+// Except on the two 20px rungs. 0.74em of their copy would set the pill at
+// 14.8px, under the 18px secondary tier, so the ladder pins it at 18px there
+// (--well-sfs), and an 18px pill on 20px copy is 0.9em, not 0.74em: wider per
+// glyph than a body character. Browser-measured on the real classes at the
+// two-column 20px rung, REROUTE plus its margin is 119px against an 8.8px
+// average character, 13.5 characters where the plain price says 10, so those
+// rungs carry `pill: 1.25` and the price scales by it.
 const PILL_CHARS = 3;
-const pillChars = (header) => statusLabel(header).length + PILL_CHARS;
+const pillChars = (header, step) => Math.ceil((statusLabel(header).length + PILL_CHARS) * (step.pill ?? 1));
 
 // A well is its frame, or its text when the text is taller — EVERY header the
 // line carries, stacked (the card shows only the first, and clamps it). Only the
@@ -165,7 +175,7 @@ const pillChars = (header) => statusLabel(header).length + PILL_CHARS;
 // replaces them draws — erring long here only ever buys a well more room.
 export function wellLines(headers, step) {
   return headers.reduce(
-    (n, h, i) => n + Math.max(1, Math.ceil((String(h).length + (i ? 0 : pillChars(h))) / step.chars)),
+    (n, h, i) => n + Math.max(1, Math.ceil((String(h).length + (i ? 0 : pillChars(h, step))) / step.chars)),
     0,
   );
 }
