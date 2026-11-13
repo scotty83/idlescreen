@@ -1721,8 +1721,11 @@ body.mode-ambient .gear--edit { display: none; }
 .trains--board--grand .train__line { font-size: 26px; }
 .trains--board--grand .train__linechip { font-size: 21px; line-height: 23px; padding: 3px 12px; border-radius: 8px; }
 .trains--board--grand .train__track { font-size: 26px; padding: 8px 14px; }
+/* 720px columns (660 until 2026-11-13): Amtrak's track became the right-hand
+   chip the other railroads use, and "Northeast Regional 171 · 9:58 AM · On
+   time" beside a "Track 14" chip wrapped its status onto a third line at 660. */
 .expand__body .trains--board--split {
-  display: grid; grid-template-columns: repeat(2, 660px);
+  display: grid; grid-template-columns: repeat(2, 720px);
   grid-template-rows: repeat(var(--board-rows, 6), min-content);
   grid-auto-flow: column; gap: 24px 80px; justify-content: center; align-content: center;
 }
