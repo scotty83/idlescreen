@@ -68,7 +68,7 @@ export function render(el, vm, _cfg) {
         <span class="train__dest">${r.colors
           .map((c) => `<i class="pathdot" style="background:#${c}"></i>`)
           .join('')}${escapeHtml(r.dest)}</span>
-        <span class="train__line">${dirShort ? `${dirShort} · ` : ''}${fmtTime(r.t)}</span>
+        <span class="train__line">${dirShort ? `${dirShort} · ` : ''}<span class="train__nb">${fmtTime(r.t)}</span></span>
       </div>
     </div>`;
   // Shallow cards can't afford section headers: flatten both directions into

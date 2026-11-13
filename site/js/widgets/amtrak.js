@@ -48,7 +48,7 @@ export function render(el, vm, cfg) {
   const row = (d) => {
     const min = Math.max(0, Math.round((d.t - nowSec) / 60));
     const primary = dest ? `Arrives ${fmtTime(d.arr)}` : escapeHtml(d.dest);
-    const line = `${escapeHtml(d.route)} ${escapeHtml(d.num)} · ${fmtTime(d.t)}${d.platform ? ` · Trk ${escapeHtml(d.platform)}` : ''}`;
+    const line = `${escapeHtml(d.route)} ${escapeHtml(d.num)} · <span class="train__nb">${fmtTime(d.t)}</span>${d.platform ? ` · <span class="train__nb">Track ${escapeHtml(d.platform)}</span>` : ''}`;
     return `<div class="train">
       <div class="train__min"><span>${fmtMin(min)}</span><small>min</small></div>
       <div class="train__info">

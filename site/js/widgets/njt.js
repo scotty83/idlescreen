@@ -23,7 +23,7 @@ export function render(el, vm, _cfg) {
             <div class="train__min"><span>${fmtMin(t.min)}</span><small>min</small></div>
             <div class="train__info">
               <span class="train__dest">${escapeHtml(t.dest)}</span>
-              <span class="train__line">${lineChipPrefix(t.line)}${fmtTime(t.time)}${t.status ? ` · ${escapeHtml(t.status)}` : ''}</span>
+              <span class="train__line">${lineChipPrefix(t.line)}<span class="train__nb">${fmtTime(t.time)}</span>${t.status ? ` · ${escapeHtml(t.status)}` : ''}</span>
             </div>
             ${t.track ? `<span class="train__track">Track ${escapeHtml(t.track)}</span>` : ''}
           </div>`;

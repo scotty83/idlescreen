@@ -59,6 +59,11 @@ function viewerEl() {
   return viewer;
 }
 
+// The close hint is the viewer's, not the panel's: pinned to the viewer's own
+// bottom edge (the tap view's .expand__hint placement), so it sits in the same
+// spot at every glass height and costs the panel's height budget nothing.
+const HINT = '<p class="text-viewer__hint">Tap anywhere to close</p>';
+
 function show(viewer, html) {
   viewer.innerHTML = html;
   viewer.hidden = false;
@@ -78,8 +83,8 @@ export function openTextViewer(title, text, { html = false } = {}) {
     <div class="text-viewer__panel">
       ${title ? `<h2 class="text-viewer__title">${escapeHtml(title)}</h2>` : ''}
       <p class="text-viewer__body">${html ? text : escapeHtml(text)}</p>
-      <p class="text-viewer__hint">Tap anywhere to close</p>
-    </div>`);
+    </div>
+    ${HINT}`);
 }
 
 const hostOf = (url) => {
@@ -99,7 +104,9 @@ export function descLineBudget(viewportH, reservedH, lineH) {
 // is feed text that wraps to one line or to four depending on the words in it,
 // and no character count predicts which. Collapsing the summary to a single line
 // and subtracting that line leaves exactly the fixed blocks — meta + headline +
-// QR block + hint + padding + gaps — whatever they happen to be right now.
+// QR block + padding + gaps — whatever they happen to be right now. The close
+// hint is out of flow (pinned to the viewer) and inside the panel's 60px bottom
+// padding when the panel fits, so it reserves nothing and is never painted over.
 function measureStory(viewer, desc) {
   const panel = desc.closest('.text-viewer__panel');
   return {
@@ -150,8 +157,8 @@ export function openStoryViewer({ title, source, age, desc, link }) {
           <span class="story__more-hint">Scan with your phone</span>
         </div>
       </div>` : ''}
-      <p class="text-viewer__hint">Tap anywhere to close</p>
-    </div>`);
+    </div>
+    ${HINT}`);
   // Fit before the QR chunk resolves: the QR's box is a fixed 232px whether or
   // not the code has painted into it, so the reservation is the same either way.
   fitStoryDesc(viewer);

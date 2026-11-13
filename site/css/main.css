@@ -119,6 +119,11 @@ html, body {
   -webkit-font-smoothing: antialiased;
   touch-action: pan-x pan-y;
 }
+/* Form controls never inherit font-family on their own (the UA gives them the
+   system control face), so every button, key and chip spoke a different face
+   from the board around it. The scattered `font-family: var(--font-board)`
+   patches below predate this and stay. */
+button, input, select, textarea { font-family: inherit; }
 
 /* …and on a viewport TALLER than the page, the leftover splits evenly instead of
    pooling at the bottom as a band. Purely cosmetic — the page block keeps its
@@ -591,6 +596,10 @@ body { position: relative; top: max(0px, calc((100dvh / var(--fit-zoom, 1) - 108
 .train__info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .train__dest { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .train__line { font-size: 20px; color: var(--ink-dim); }
+/* One meta-line token that must read whole: the departure time, Amtrak's
+   "Track N". The line may still wrap at 3 columns, between tokens only, so
+   "9:54" and "AM" never land on separate lines. */
+.train__nb { white-space: nowrap; }
 /* LIRR / Metro-North line name as a filled signage chip in the MTA's official
    line color (background and ink both come from lines.js, per line). 17px text
    on an 18px line box + 2px padding = a 22px chip, which fits inside the meta
@@ -1323,6 +1332,14 @@ body.mode-ambient .gear--edit { display: none; }
   font-variant-numeric: tabular-nums; margin: 16px 0; min-height: 64px;
 }
 .code__display--pin { letter-spacing: 0.35em; }
+/* A typing field (city, ticker, station, handle, name) gets a visible well so a
+   standing user can see where the keys land. The fixed-length --pin codes keep
+   their bare display. 860px is the pane's spine (.rows, .row, .osk). Typed text
+   wraps, even a run with no spaces in it, and is never clipped. */
+.code__display:not(.code__display--pin) {
+  background: var(--bg-card); border: 2px solid rgba(255, 255, 255, 0.3); border-radius: 12px;
+  padding: 0 20px; box-sizing: border-box; max-width: 860px; overflow-wrap: break-word;
+}
 .key {
   min-height: 64px; font-size: 26px; font-weight: 600;
   border: none; border-radius: 12px; cursor: pointer;
@@ -1522,11 +1539,21 @@ body.mode-ambient .gear--edit { display: none; }
 .text-viewer__panel { max-width: 1400px; padding: 60px; display: flex; flex-direction: column; gap: 26px; }
 .text-viewer__title { font-size: 24px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); }
 .text-viewer__body { font-size: 42px; line-height: 1.45; color: var(--ink); text-wrap: pretty; }
-.text-viewer__hint { font-size: 20px; color: var(--ink-faint); }
+/* Pinned to the viewer (fixed, inset 0), not the page or the panel: the tap
+   view's .expand__hint, same size and the same 32px off the real bottom edge,
+   so it lands alike at 1040, 1080 and 1200. Its 26px line ends 58px up, inside
+   the panel's 60px bottom padding, so a panel that fits never paints under it. */
+.text-viewer__hint {
+  position: absolute; left: 0; right: 0; bottom: 32px; margin: 0;
+  text-align: center; font-size: 22px; line-height: 1.2; color: var(--ink-faint);
+}
 
 /* Story view: a tapped headline's summary + a QR to the full article (the board
    is a shared kiosk and finance sources are paywalled — read it on your phone). */
-.text-viewer__panel.story { max-width: 1200px; gap: 22px; }
+/* 84px bottom padding, 24px more than the other three sides: on a story that
+   fills the screen the QR card is the last block, and at 60px it stopped 2px
+   above the pinned close hint. This keeps a block gap between them. */
+.text-viewer__panel.story { max-width: 1200px; gap: 22px; padding-bottom: 84px; }
 .story__meta { display: flex; align-items: baseline; gap: 14px; font-size: 22px; text-transform: uppercase; letter-spacing: 0.08em; }
 .story__src { font-weight: 600; color: var(--ink-dim); }
 .story__age { color: var(--ink-faint); text-transform: none; } /* keep "12m", not "12M" */
@@ -1541,7 +1568,7 @@ body.mode-ambient .gear--edit { display: none; }
    must never be the thing that gets cut. Unset — no layout engine, or a story
    with no summary — it resolves to `none`, i.e. the pre-clamp behaviour. */
 .story__desc {
-  font-size: 30px; line-height: 1.5; color: var(--ink); text-wrap: pretty; max-width: 34ch; /* full ink: it's the content they tapped for, read at 6 ft */
+  font-size: 30px; line-height: 1.5; color: var(--ink); text-wrap: pretty; max-width: 52ch; /* full ink: it's the content they tapped for, read at 6 ft */
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--desc-lines, none); overflow: hidden;
 }
 .story__more { display: flex; align-items: center; gap: 32px; margin-top: 10px; }
@@ -1556,7 +1583,8 @@ body.mode-ambient .gear--edit { display: none; }
 @media (prefers-reduced-motion: no-preference) {
   .text-viewer__panel.story { animation: story-in 200ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
-@keyframes story-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+/* Opacity only: nothing slides (calm motion). */
+@keyframes story-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* Calm tap affordance: no chrome at rest, a brief press tint on touch so the
    headline feels responsive (the "there's more here" signal is the press). */
@@ -2259,12 +2287,19 @@ body.mode-ambient .gear--edit { display: none; }
 .editor__blocks.is-resize-gesture .edit-placeholder { z-index: 4; }
 .edit-block__size {
   position: absolute; left: 0; right: 0; bottom: 14px;
-  /* Clear the corner controls (resize handle right, delete badge left) so a
-     wrapped hint never runs underneath them on small tiles. */
-  padding: 0 60px;
+  /* The resize handle owns the tile's bottom-right 72x72 (64px chip at
+     right: 8px). 80px each side is that corner plus 8px of air, kept on both
+     sides so the hint stays centred: no line, however wide it wraps, can
+     reach the handle. */
+  padding: 0 80px;
   text-align: center; font-size: 18px; color: var(--ink-faint);
   pointer-events: none;
 }
+/* A 2-wide tile (~298px) leaves only 138px between symmetric pads, which
+   would stack the hint three or four lines deep. The bottom-left corner is
+   free (the delete badge sits top-left), so the hint left-aligns into the
+   room left of the handle instead. */
+.edit-block[data-w="2"] .edit-block__size { left: 16px; right: 80px; padding: 0; text-align: left; }
 .edit-block { flex-direction: column; gap: 4px; }
 
 /* Navigational chrome, not content: small + --ink-dim (--ink-dim stays AA-safe

@@ -325,7 +325,7 @@ describe('stripData', () => {
     const out = stripData(mixed, { widgets: ['njt'] }, { nowSec: NOW });
     expect(out.transit).toHaveLength(1);
     expect(out.transit[0].label).toContain('Trenton');
-    expect(out.transit[0].label).toContain('Tk 3');
+    expect(out.transit[0].label).toContain('Track 3');
     expect(out.transit[0].min).toBe(7);
   });
   it('drops an entry with no usable absolute time (unverifiable countdown)', () => {
@@ -358,6 +358,11 @@ describe('stripHtml', () => {
     expect(full).toContain('Clear'); // conditions, not just temp
     expect(full).toContain('LIRR · Mineola');
     expect(full).toContain('<b>8 min</b>');
+  });
+  it('leads a transit segment with its minutes, then the label', () => {
+    // "Track 17 8 min" read as "17 8": the minutes come first.
+    const out = stripHtml({ temp: null, cond: null, transit: [{ label: 'LIRR · Port Washington · Track 17', min: 8 }] }, now);
+    expect(out).toContain('<span class="strip__transit"><b>8 min</b> LIRR · Port Washington · Track 17</span>');
   });
   it('omits the time under a clock-face screensaver (no duplication)', () => {
     const noTime = stripHtml({ temp: 72, cond: 'Clear', transit: [] }, now, { showTime: false });

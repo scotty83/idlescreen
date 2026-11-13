@@ -89,6 +89,22 @@ describe('text viewer', () => {
     expect(document.querySelector('.text-viewer__body .bullet--inline')?.textContent).toBe('1');
   });
 
+  it('pins the close hint to the viewer, outside the panel, for both views', () => {
+    // Out of the panel's flow, so it reads in the same spot as the tap view's
+    // hint and costs the story summary's height budget nothing.
+    document.body.innerHTML = '';
+    openTextViewer('Cloud Services', 'Sign-in degraded');
+    const viewer = document.querySelector('#text-viewer');
+    const hintOf = () => viewer.querySelector('.text-viewer__hint');
+    expect(hintOf().textContent).toBe('Tap anywhere to close');
+    expect(hintOf().parentElement).toBe(viewer);
+    expect(viewer.querySelector('.text-viewer__panel .text-viewer__hint')).toBeNull();
+    openStoryViewer({ title: 'Headline', source: 'NYT', age: '2m', desc: 'Summary', link: 'https://example.com/a' });
+    expect(viewer.querySelectorAll('.text-viewer__hint')).toHaveLength(1);
+    expect(hintOf().parentElement).toBe(viewer);
+    expect(viewer.querySelector('.text-viewer__panel .text-viewer__hint')).toBeNull();
+  });
+
   it('auto-dismisses after 20 seconds so an abandoned board recovers', () => {
     vi.useFakeTimers();
     document.body.innerHTML = '';
@@ -111,27 +127,32 @@ describe('text viewer', () => {
  *
  * The pixel numbers below were measured in headless Chrome at 1920 wide on the
  * shipped classes: a 30px/1.5 summary is a 45px line, and the fixed blocks —
- * meta + headline + QR block + hint + 120px of panel padding + gaps — cost 610px
- * behind a two-line headline and 664px behind a three-line one.
+ * meta + headline + QR block + 144px of panel padding (60 top, 84 bottom) +
+ * gaps — cost 586px behind a two-line headline and 640px behind a three-line
+ * one. The close hint is not among them: it is pinned to the viewer, out of the
+ * panel's flow, and the 84px bottom padding is what keeps the QR card a block
+ * gap above it (re-measured 2026-11-12; with the hint in flow and 60px all
+ * round these were 610 and 664).
  */
 const LINE_H = 45;
-const RESERVED_2LINE_TITLE = 610;
-const RESERVED_3LINE_TITLE = 664;
+const RESERVED_2LINE_TITLE = 586;
+const RESERVED_3LINE_TITLE = 640;
 const BOARD_H = 1040;      // Board Pro, the height the fit has to survive
 const NAVIGATOR_H = 1200;  // Room Navigator PWA
 
 describe('story view: the summary is fitted to the screen', () => {
   it('gives a long summary only the lines that honestly remain', () => {
-    // 1040 - 610 = 430px of slack, which is 9 whole 45px lines and a 25px
+    // 1040 - 586 = 454px of slack, which is 10 whole 45px lines and a 4px
     // remainder that must NOT be handed out — a partial line is a clipped line.
-    expect(descLineBudget(BOARD_H, RESERVED_2LINE_TITLE, LINE_H)).toBe(9);
+    expect(descLineBudget(BOARD_H, RESERVED_2LINE_TITLE, LINE_H)).toBe(10);
     expect(descLineBudget(1080, RESERVED_2LINE_TITLE, LINE_H)).toBe(10);
     expect(descLineBudget(NAVIGATOR_H, RESERVED_2LINE_TITLE, LINE_H)).toBe(13);
   });
 
   it('keeps the whole panel inside the viewport, so the QR can never be clipped', () => {
-    // The reservation INCLUDES the QR block and the hint, so this identity is
-    // the guarantee: whatever the budget comes out at, the panel still fits.
+    // The reservation INCLUDES the QR block, so this identity is the guarantee:
+    // whatever the budget comes out at, the panel still fits. The hint lives
+    // inside the panel's bottom padding, so a fitting panel never covers it.
     for (const viewportH of [1040, 1080, 1200]) {
       for (const reserved of [RESERVED_2LINE_TITLE, RESERVED_3LINE_TITLE]) {
         const panelH = reserved + descLineBudget(viewportH, reserved, LINE_H) * LINE_H;
@@ -141,7 +162,7 @@ describe('story view: the summary is fitted to the screen', () => {
   });
 
   it('leaves a summary that already fits alone', () => {
-    // A three-line summary against a nine-line budget: the clamp is above the
+    // A three-line summary against a ten-line budget: the clamp is above the
     // natural line count, so it never bites and the text is untouched.
     expect(descLineBudget(BOARD_H, RESERVED_2LINE_TITLE, LINE_H)).toBeGreaterThan(3);
   });
@@ -169,8 +190,8 @@ describe('story view: the summary is fitted to the screen', () => {
     document.body.innerHTML = '';
     openStoryViewer(story(LONG));
     const viewer = document.querySelector('#text-viewer');
-    expect(fitStoryDesc(viewer, stub(RESERVED_2LINE_TITLE))).toBe(9);
-    expect(descLines(viewer)).toBe('9');
+    expect(fitStoryDesc(viewer, stub(RESERVED_2LINE_TITLE))).toBe(10);
+    expect(descLines(viewer)).toBe('10');
     // The affordance a truncated summary hands off to is still there.
     expect(viewer.querySelector('.story__qr')).not.toBeNull();
     expect(viewer.textContent).toContain('Read the full story');
@@ -187,14 +208,14 @@ describe('story view: the summary is fitted to the screen', () => {
 
     openStoryViewer(story(SHORT));
     expect(descLines(viewer)).toBe(''); // rebuilt panel carries nothing stale
-    expect(fitStoryDesc(viewer, stub(RESERVED_2LINE_TITLE))).toBe(9);
-    expect(descLines(viewer)).toBe('9');
+    expect(fitStoryDesc(viewer, stub(RESERVED_2LINE_TITLE))).toBe(10);
+    expect(descLines(viewer)).toBe('10');
 
     openStoryViewer(story(LONG));
     expect(fitStoryDesc(viewer, stub(RESERVED_3LINE_TITLE))).toBe(8);
     expect(descLines(viewer)).toBe('8');
     // And the taller viewport re-measures too, rather than reusing the board's.
-    expect(fitStoryDesc(viewer, stub(RESERVED_3LINE_TITLE, NAVIGATOR_H))).toBe(11);
+    expect(fitStoryDesc(viewer, stub(RESERVED_3LINE_TITLE, NAVIGATOR_H))).toBe(12);
   });
 
   it('leaves a story with no summary alone', () => {
@@ -243,6 +264,21 @@ describe('story view: the stylesheet half of the fix', () => {
     // Unset -- no layout engine, or a story with no summary -- must mean
     // "no clamp", i.e. exactly the behaviour before this fix.
     expect(body).toContain('-webkit-line-clamp: var(--desc-lines, none)');
+  });
+
+  it('pins the hint like the tap view: centred, 22px, 32px off the viewer bottom', () => {
+    const hint = rule('.text-viewer__hint');
+    for (const decl of ['position: absolute', 'bottom: 32px', 'text-align: center', 'font-size: 22px', 'line-height: 1.2', 'color: var(--ink-faint)']) {
+      expect(hint).toContain(decl);
+    }
+  });
+
+  it('fades the story in without sliding it', () => {
+    const at = css.indexOf('@keyframes story-in');
+    expect(at).toBeGreaterThan(-1);
+    const frames = css.slice(at, css.indexOf('\n', at));
+    expect(frames).toContain('opacity: 0');
+    expect(frames).not.toContain('transform');
   });
 
   it('breaks a headline that has no break opportunity of its own', () => {

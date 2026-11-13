@@ -432,6 +432,23 @@ describe('widget renderers', () => {
     }
   });
 
+  it('train meta lines hold the departure time in one no-break token', () => {
+    // At 3 columns the meta line wraps; "9:54" / "AM" must never split, so the
+    // time rides in .train__nb (white-space: nowrap) on every rail-style row.
+    for (const [mod, vm] of [
+      [lirr, DEMO_VMS.lirr], [mnr, DEMO_VMS.mnr], [njt, DEMO_VMS.njt],
+      [amtrak, DEMO_VMS.amtrak], [ferry, DEMO_VMS.ferry], [pathw, DEMO_VMS.path],
+    ]) {
+      const host = el();
+      mod.render(host, vm, CFG);
+      const nb = host.querySelector('.train__line .train__nb');
+      expect(nb, mod.meta.id).not.toBeNull();
+      expect(nb.textContent, mod.meta.id).toMatch(/^\d{1,2}:\d{2}\s?[AP]M$/);
+    }
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../site/css/main.css'), 'utf8');
+    expect(css).toMatch(/\.train__nb\s*\{\s*white-space:\s*nowrap;\s*\}/);
+  });
+
   it('sports shows the Next line only after finals/postponed/offseason', () => {
     const rowBase = { lg: 'mlb', abbr: 'X', name: 'X', record: '', logo: null, lastLine: null, nextLine: 'vs LAD · 7/20 - 7:10 PM' };
     const host1 = el();
@@ -1722,7 +1739,9 @@ describe('amtrak render', () => {
     expect(el.textContent).toContain('Washington');
     expect(el.textContent).toContain('Northeast Regional');
     expect(el.textContent).toContain('171');
-    expect(el.textContent).toContain('Trk 7'); // platform shown when present
+    expect(el.textContent).toContain('Track 7'); // platform shown when present
+    // The platform is one no-break token, like the time beside it.
+    expect([...el.querySelectorAll('.train__nb')].map((s) => s.textContent)).toContain('Track 7');
     expect(el.querySelector('.talert')).toBeTruthy();
     expect(el.querySelector('.train__status.is-warn')).toBeTruthy(); // "5 min late"
   });

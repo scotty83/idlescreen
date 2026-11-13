@@ -175,9 +175,13 @@ export function openEditMode(cfg, { root, onDone, onCancel, cellSize } = {}) {
   }
 
   function render() {
+    // data-w is the tile's width signal for CSS (the size hint changes shape on
+    // 2-wide tiles). A block's own footprint changes only here: a resize
+    // gesture previews on the placeholder and re-renders on release, so the
+    // attribute is never stale mid-gesture.
     blocksHost.innerHTML = layout
       .map(
-        (r) => `<div class="edit-block" data-id="${r.id}"
+        (r) => `<div class="edit-block" data-id="${r.id}" data-w="${r.w}"
           style="grid-column:${r.x + 1} / span ${r.w}; grid-row:${r.y + 1} / span ${r.h}">
           <span class="edit-grip" aria-hidden="true"></span>
           <span class="edit-block__title">${TITLES[r.id] ?? r.id}</span>

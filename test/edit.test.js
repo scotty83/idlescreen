@@ -123,6 +123,17 @@ describe('openEditMode', () => {
     expect(label.textContent).toContain('6×4 · min 3×4');
     expect(label.textContent).toContain('hourly'); // capacity impact line
   });
+
+  it('tags every block with its width, kept current across a resize', () => {
+    // CSS left-aligns the size hint on 2-wide tiles (data-w="2") so it clears
+    // the resize handle; a stale width would leave the hint under the handle.
+    const editor = openEditMode(CFG, { root, cellSize: { w: 100, h: 100 } });
+    const w = (id) => root.querySelector(`.edit-block[data-id="${id}"]`).dataset.w;
+    expect(w('weather')).toBe('6');
+    expect(w('aqi')).toBe('2');
+    expect(editor._test.resize('aqi', 3, 2)).toBe(true);
+    expect(w('aqi')).toBe('3');
+  });
 });
 
 // The big categories hide behind expanders (Commute 10 cards, Images 5, Daily

@@ -69,7 +69,7 @@ export function render(el, vm, _cfg) {
               <div class="train__min"><span>${fmtMin(d.min)}</span><small>min</small></div>
               <div class="train__info">
                 <span class="train__dest">${escapeHtml(d.dest)}</span>
-                <span class="train__line">${lineChipPrefix(d.branch)}${fmtTime(d.t)}</span>
+                <span class="train__line">${lineChipPrefix(d.branch)}<span class="train__nb">${fmtTime(d.t)}</span></span>
               </div>
             </div>`;
   const rows = vm.departures.map(row);
