@@ -9,6 +9,7 @@ import * as lirr from '../site/js/widgets/lirr.js';
 import * as mnr from '../site/js/widgets/mnr.js';
 import * as njt from '../site/js/widgets/njt.js';
 import * as ferry from '../site/js/widgets/ferry.js';
+import * as amtrak from '../site/js/widgets/amtrak.js';
 import { board as mountBoard } from './helpers/board.js';
 
 const { render: renderLirr } = lirr;
@@ -87,11 +88,39 @@ describe('rail +N badge and whole-card expand', () => {
     expect(board.style.getPropertyValue('--board-rows')).toBe('5');
   });
 
-  it('is inert when everything fits: no badge, no expansion', () => {
+  // Every card opens when tapped (Sean, 2026-11-13): a card that fits all its
+  // trains still opens the board at reading size. Only the badge tracks hidden.
+  it('still opens the board when everything fits: no badge, every train', () => {
     const { card } = railBoard('lirr', renderLirr, lirrVm(2));
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelectorAll('.train').length).toBe(2); // the card shows them all
+    expect(card.classList.contains('is-expandable')).toBe(true);
+    expect(card.getAttribute('role')).toBe('button');
     expect(card.classList.contains('is-expandable-pill')).toBe(false);
+    card.click();
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelectorAll('.train').length).toBe(2);
+    expect(overlay().querySelector('.trains--board--grand')).not.toBeNull();
+  });
+
+  it('opens a lone departure as the grand column too', () => {
+    const { card } = railBoard('lirr', renderLirr, lirrVm(1));
+    card.click();
+    expect(overlay().querySelectorAll('.train').length).toBe(1);
+    expect(overlay().querySelector('.trains--board--grand')).not.toBeNull();
+  });
+
+  it('stays inert with no departures, and on the station prompt', () => {
+    const { card } = railBoard('lirr', renderLirr, lirrVm(5));
+    renderLirr(card.querySelector('.card__body'), lirrVm(0), {});
+    expect(card.textContent).toContain('No departures');
+    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.hasAttribute('tabindex')).toBe(false);
+    card.click();
+    expect(isExpandOpen()).toBe(false);
+
+    renderLirr(card.querySelector('.card__body'), { needsStation: true }, {});
+    expect(card.classList.contains('is-expandable')).toBe(false);
     card.click();
     expect(isExpandOpen()).toBe(false);
   });
@@ -128,13 +157,15 @@ describe('rail +N badge and whole-card expand', () => {
     expect(card.querySelector('.trains').classList.contains('trains--widemin')).toBe(false);
   });
 
-  it('drops the badge and the expansion when a refresh leaves nothing hidden', () => {
+  it('drops only the badge when a refresh leaves nothing hidden: the board stays', () => {
     const { card } = railBoard('lirr', renderLirr, lirrVm(5));
-    expect(card.classList.contains('is-expandable')).toBe(true);
+    expect(card.querySelector('.card__more')).not.toBeNull();
     renderLirr(card.querySelector('.card__body'), lirrVm(2), {});
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.classList.contains('is-expandable')).toBe(true);
     expect(card.classList.contains('is-expandable-pill')).toBe(false);
+    card.click();
+    expect(overlay().querySelectorAll('.train').length).toBe(2);
   });
 
   it('tapping an alert banner reads that alert full screen, not the schedule', () => {
@@ -163,15 +194,32 @@ describe('rail +N badge and whole-card expand', () => {
     expect(overlay().querySelectorAll('.train').length).toBe(5);
   });
 
-  it('a banner reads full screen even when no departures overflow', () => {
-    // No +N, no whole-card expand affordance — but the banner still completes
-    // its own clamped text.
+  it('keeps the banner/board split when no departures overflow', () => {
+    // No +N now, but the card still opens: the banner reads its alert, every
+    // other tap opens the board.
     const vm = { ...lirrVm(2), alerts: [{ routes: [], stops: [], header: 'Alert on a quiet card.', body: 'Detail.' }] };
     const { card } = railBoard('lirr', renderLirr, vm);
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelector('.card__more')).toBeNull();
+    expect(card.classList.contains('is-expandable')).toBe(true);
     card.querySelector('.talert').click();
     expect(isExpandOpen()).toBe(true);
     expect(overlay().textContent).toContain('Alert on a quiet card.');
+    expect(overlay().querySelector('.train')).toBeNull();
+    closeExpand();
+    card.querySelector('.card__body').click();
+    expect(overlay().querySelectorAll('.train').length).toBe(2);
+    expect(overlay().querySelector('.alert-view')).toBeNull();
+  });
+
+  it('a banner on a card with no departures still reads, while the rest of the card stays inert', () => {
+    const vm = { ...lirrVm(0), alerts: [{ routes: [], stops: [], header: 'Service suspended.', body: 'Detail.' }] };
+    const { card } = railBoard('lirr', renderLirr, vm);
+    expect(card.classList.contains('is-expandable')).toBe(false);
+    card.querySelector('.card__body').click();
+    expect(isExpandOpen()).toBe(false);
+    card.querySelector('.talert').click();
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().textContent).toContain('Service suspended.');
   });
 
   it('keeps the snapshot when the source card re-renders underneath it', () => {
@@ -214,6 +262,50 @@ describe('rail +N on the other boards', () => {
     expect(overlay().querySelectorAll('.train').length).toBe(5);
     expect(overlay().querySelector('.expand__title').textContent).toBe('Metro-North');
   });
+
+  // One wiring, five boards: each one that fits every train still opens it,
+  // and each one with no departures stays inert.
+  const amtrakVm = (n) => ({
+    updatedAt: 1000,
+    departures: Array.from({ length: n }, (_, i) => ({
+      t: Math.floor(Date.now() / 1000) + 600 * (i + 1), dest: `Station ${i}`, route: 'Northeast Regional',
+      num: String(170 + i), platform: null, status: '', stops: [],
+    })),
+  });
+  const mnrVm = (n) => ({ departures: Array.from({ length: n }, (_, i) => ({
+    t: 1000 + i * 600, min: 10 + i * 10, dest: `Stop ${i}`, destId: String(i),
+    branch: 'Harlem', routeId: '2', track: null,
+  })), destName: 'Southeast' });
+  const ferryVm = (n) => ({ landingName: 'Wall St/Pier 11', departures: Array.from({ length: n }, (_, i) => ({
+    t: 1000 + i * 600, min: 10 + i * 10, dest: `Landing ${i}`, route: null,
+  })) });
+  const BOARDS = [
+    ['lirr', lirr, lirrVm, 'LIRR'],
+    ['njt', njt, (n) => ({ ...njtVm(n), alerts: [] }), 'NJ Transit'],
+    ['mnr', mnr, mnrVm, 'Metro-North'],
+    ['amtrak', amtrak, amtrakVm, 'Amtrak'],
+    ['ferry', ferry, ferryVm, 'NYC Ferry'],
+  ];
+  for (const [id, mod, vmOf, title] of BOARDS) {
+    it(`${id}: a card that fits every train still opens the board with all of them`, () => {
+      const { card } = mountBoard(mod, { rect: { w: 3, h: 2 }, vm: vmOf(2), cfg: {} });
+      expect(card.querySelector('.card__more')).toBeNull();
+      expect(card.querySelectorAll('.train').length).toBe(2);
+      expect(card.classList.contains('is-expandable')).toBe(true);
+      card.querySelector('.card__body').click();
+      expect(isExpandOpen()).toBe(true);
+      expect(overlay().querySelectorAll('.train').length).toBe(2);
+      expect(overlay().querySelector('.expand__title').textContent).toBe(title);
+    });
+
+    it(`${id}: a card with no departures stays inert`, () => {
+      const { card } = mountBoard(mod, { rect: { w: 3, h: 2 }, vm: vmOf(0), cfg: {} });
+      expect(card.textContent).toContain('No departures');
+      expect(card.classList.contains('is-expandable')).toBe(false);
+      card.querySelector('.card__body').click();
+      expect(isExpandOpen()).toBe(false);
+    });
+  }
 
   it('Ferry: badge and full board', () => {
     const vm = { landingName: 'Wall St/Pier 11', departures: Array.from({ length: 5 }, (_, i) => ({

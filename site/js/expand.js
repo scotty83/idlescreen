@@ -1,12 +1,16 @@
-// Tap-to-expand: one shared full-screen overlay that shows everything a capped
-// list card ALREADY fetched — the contents of its quiet "+N" badge — and then
-// closes itself. The resting board never moves and never scrolls; expansion is
-// a transient view, and the idle timer guarantees the board returns to its
-// canonical state on its own (no residue left by a passer-by).
+// Tap-to-expand: one shared full-screen overlay that shows everything a list
+// card ALREADY fetched, at reading size, including whatever its quiet "+N"
+// badge counts, and then closes itself. The resting board never moves and never
+// scrolls; expansion is a transient view, and the idle timer guarantees the
+// board returns to its canonical state on its own (no residue left by a
+// passer-by).
 //
 // Expansion reveals only what is already in hand: no fetch, no worker load.
-// Cards register a builder via setExpandSource; a card with nothing hidden
-// registers nothing and its taps stay inert.
+// Cards register a builder via setExpandSource whenever they have data to
+// show, whether or not anything is hidden (Sean, 2026-11-13): every card opens
+// when tapped, and the badge only says how much the card could not fit. A card
+// with nothing to show (an empty, error or setup state) registers nothing and
+// its taps stay inert.
 
 import { escapeHtml } from './util.js';
 import { isOverlayOpen, registerSurface, whileShown } from './surfaces.js';
@@ -214,8 +218,10 @@ export function closeExpand() {
 
 // Registers (or clears) a card's expansion. `build` returns the view to open —
 // it is called ONCE, at tap time, so the overlay shows the data the card was
-// showing when it was tapped. Pass null/undefined when nothing is hidden: the
-// card is then inert, matching the absent "+N" badge.
+// showing when it was tapped. Register it whenever the card has a row to show,
+// hidden rows or not; the "+N" badge is set separately (setMoreBadge) and is
+// never the condition. Pass null/undefined only when the card has nothing to
+// show (empty, error, setup prompt): the card is then inert.
 //
 // The whole card is the target. That is the one-tap rule as the board actually
 // ships it, and there is no option to narrow it: the engine carried a `trigger`
@@ -236,9 +242,9 @@ export function closeExpand() {
 // landing on a subview's selector opens that build instead of the card's (the
 // rail alert banners read full screen; the schedule is everything else). The
 // matched element is passed to the subview build so one selector can serve
-// several banners. A card with subviews but no card build is legal — the
-// banner still reads on a card with nothing hidden — and only a card build
-// earns the is-expandable affordance.
+// several banners. A card with subviews but no card build is legal (the
+// banner still reads on a rail card with no departures under it), and only a
+// card build earns the is-expandable affordance.
 export function setExpandSource(el, build, { except = null, subviews = null } = {}) {
   const card = el?.closest?.('.card');
   if (!card) return; // test fakes without closest(): no-op, like setMoreBadge
@@ -314,7 +320,7 @@ export function initExpand(host) {
   host.addEventListener('click', (e) => {
     const card = e.target.closest?.('.card');
     const source = card && sources.get(card);
-    if (!source) return; // nothing hidden on this card (or not an expandable one)
+    if (!source) return; // nothing to show on this card (or not an expandable one)
     // A subview tap outranks the card view and outranks `except` with it: the
     // banner IS its own target.
     const sub = source.subviews?.find((s) => e.target.closest?.(s.selector));

@@ -207,7 +207,7 @@ describe('widget renderers', () => {
     expect(text).toContain('not renting'); // the ok:false demo station
   });
 
-  it('tfl shows line status, dims + makes tappable a disrupted line', () => {
+  it('tfl shows line status and marks a disrupted line', () => {
     const host = el();
     const cfg = { tfl: { lines: ['central', 'district', 'northern'] } }; // northern absent from digest
     tfl.render(host, DEMO_VMS.tfl, cfg);
@@ -215,7 +215,10 @@ describe('widget renderers', () => {
     expect(text).toContain('Central');
     expect(text).toContain('Good Service');
     expect(text).toContain('Part Closure');
-    expect(host.querySelector('.tfl--tap')).not.toBeNull();
+    // The disrupted line is marked; its full reason lives behind the card's
+    // own tap (the ledger), not a per-row reader.
+    expect(host.querySelector('.tfl--alert')).not.toBeNull();
+    expect(host.querySelector('.tfl--tap')).toBeNull();
   });
 
   it('subway renders route bullets and flags alerting lines', () => {

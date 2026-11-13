@@ -68,8 +68,8 @@ describe('parity: the rail departures board', () => {
   });
   const vm = (n) => ({ departures: Array.from({ length: n }, (_, i) => dep(i)), destName: 'Rockville Centre' });
 
-  // A 3x2 rail card seats two departures, so three is the smallest list that
-  // hides anything and therefore the smallest one that opens at all.
+  // Every card with a departure opens (Sean, 2026-11-13), so the sweep runs
+  // from one train up; zero is the one count with nothing behind the tap.
   const MAX = 64;
 
   it('sweeps 0 to 64 departures: identical class and identical --board-rows', () => {
@@ -77,8 +77,8 @@ describe('parity: the rail departures board', () => {
     for (let n = 0; n <= MAX; n++) {
       closeExpand();
       render(vm(n));
-      if (n <= 2) {
-        // Nothing hidden: the card is inert and no board is ever built. Stated
+      if (n === 0) {
+        // No departures: the card is inert and no board is ever built. Stated
         // so the sweep's floor is a fact rather than an omission.
         card.click();
         expect(isExpandOpen(), `${n} departures must not open`).toBe(false);

@@ -51,7 +51,7 @@ export function render(el, vm, cfg) {
     return;
   }
   const byId = new Map((vm.stations ?? []).map((s) => [s.id, s]));
-  const shown = fitList(el, {
+  fitList(el, {
     id: meta.id,
     items: chosen,
     defaultSize: [3, 4],
@@ -71,19 +71,15 @@ export function render(el, vm, cfg) {
         .join('');
     },
   });
-  const hidden = chosen.length - shown;
-  // Badge and expansion agree exactly: no badge, no expansion. The rows here
-  // are not tappable, so the whole card is the target.
-  setExpandSource(
-    el,
-    hidden > 0
-      ? () => ({
-        title: meta.title,
-        note: `${chosen.length} stations`,
-        bodyHtml: bikeWells(chosen, byId),
-      })
-      : null,
-  );
+  // The rows here are not tappable, so the whole card is the target, and it
+  // opens the wells whatever the card had room for (Sean, 2026-11-13): every
+  // card opens when tapped. The badge fitList pinned counts hidden stations
+  // and nothing else.
+  setExpandSource(el, () => ({
+    title: meta.title,
+    note: `${chosen.length} ${chosen.length === 1 ? 'station' : 'stations'}`,
+    bodyHtml: bikeWells(chosen, byId),
+  }));
 }
 
 export async function fetchData(cfg, net) {

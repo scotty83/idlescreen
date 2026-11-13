@@ -1,11 +1,10 @@
 // London TfL line status — a Subway-style board for the lines you pick, from
-// the worker's /tfl/status digest. Colour dot + name + status; tap a disrupted
-// line for the full reason.
+// the worker's /tfl/status digest. Colour dot + name + status; tap the card
+// for every line with its full reason.
 
 import { escapeHtml, setupPrompt } from '../util.js';
 import { WORKER_URL } from '../env.js';
 import { fitList } from '../capacity.js';
-import { openTextViewer, defersToExpand } from '../textviewer.js';
 import { setExpandSource } from '../expand.js';
 import { ledgerBody } from '../ledger.js';
 import { TFL_LINES } from '../tfl-lines.js';
@@ -45,10 +44,7 @@ export function render(el, vm, cfg) {
       ok: live ? live.ok : true, status: live ? live.status : '—', reason: live?.reason ?? '',
     };
   });
-  // The rows the card ended up drawing, in the order it drew them: the tap
-  // handler below indexes into this, so it is written by the draw itself.
-  let ordered = rows;
-  const shown = fitList(el, {
+  fitList(el, {
     id: meta.id,
     items: rows,
     fallback: 4,
@@ -56,12 +52,12 @@ export function render(el, vm, cfg) {
     draw: (n) => {
       // Alerting lines take priority when truncating (Subway's rule). Drawing
       // fewer than every line IS the truncation, so that is the test.
-      ordered = n < rows.length
+      const ordered = n < rows.length
         ? [...rows].sort((a, b) => Number(a.ok) - Number(b.ok)).slice(0, n)
         : rows;
       el.style.setProperty('--n', String(ordered.length)); // elastic row-gap divisor
       el.innerHTML = ordered
-        .map((r, i) => `<div class="tfl ${r.ok ? '' : 'tfl--alert'}${!r.ok && r.reason ? ' tfl--tap' : ''}" data-i="${i}">
+        .map((r) => `<div class="tfl ${r.ok ? '' : 'tfl--alert'}">
         <span class="tfl__dot" style="background:${r.color}"></span>
         <span class="tfl__name">${escapeHtml(r.name)}</span>
         <span class="tfl__status">${escapeHtml(r.status)}</span>
@@ -69,23 +65,19 @@ export function render(el, vm, cfg) {
         .join('');
     },
   });
-  const hidden = rows.length - shown;
-  // Badge and expansion agree exactly: no badge, no expansion. A card showing
-  // every line keeps its per-row reader, which loses nothing.
+  // The card ALWAYS opens the ledger (Sean, 2026-11-13), the rule Cloud
+  // Services took first: every card opens when tapped. This one used to follow
+  // "no badge, no expansion" and keep a per-row reader for a disrupted line
+  // when nothing overflowed. With the ledger always behind the card that reader
+  // could never be reached (it deferred to any expandable card), and nothing is
+  // lost with it gone: the ledger shows every line's reason uncut. The badge
+  // fitList pinned still counts only hidden lines.
   const alerting = rows.filter((r) => !r.ok).length;
-  const note = alerting ? `${alerting} of ${rows.length} lines with alerts` : `all ${rows.length} lines good`;
-  setExpandSource(
-    el,
-    hidden > 0 ? () => ({ title: meta.title, note, bodyHtml: ledgerBody(tflItems(rows)) }) : null,
-  );
-  el.querySelectorAll('.tfl--tap').forEach((row) =>
-    row.addEventListener('click', () => {
-      // One tap, one destination: the ledger carries this reason in full.
-      if (defersToExpand(row)) return;
-      const r = ordered[Number(row.dataset.i)];
-      openTextViewer(`${r.name} — ${r.status}`, r.reason);
-    }),
-  );
+  // A one-line config reads "1 line good", never "all 1 lines good": the
+  // ledger now opens on cards that small too.
+  const good = rows.length === 1 ? '1 line good' : `all ${rows.length} lines good`;
+  const note = alerting ? `${alerting} of ${rows.length} lines with alerts` : good;
+  setExpandSource(el, () => ({ title: meta.title, note, bodyHtml: ledgerBody(tflItems(rows)) }));
 }
 
 export async function fetchData(_cfg, net) {

@@ -346,20 +346,36 @@ describe('TfL Status expand', () => {
     expect(items[0].notes).toEqual([]);
   });
 
-  it('a disrupted row DEFERS to the expand', () => {
+  it('a tap on a disrupted row opens the ledger, never the one-line reader', () => {
     const { card } = board('tfl', renderTfl, tflVm, tflCfg(lines), [3, 2]);
-    card.querySelector('.tfl--tap').click();
+    card.querySelector('.tfl--alert').click();
     expect(readerOpen()).toBe(false);
     expect(isExpandOpen()).toBe(true);
   });
 
-  it('but a card showing every line keeps its per-row reader', () => {
+  // Every card opens when tapped (Sean, 2026-11-13), the Cloud Services rule:
+  // the per-row reader a fitting card used to keep is gone, and the ledger
+  // carries its prose uncut.
+  it('a card showing every line still opens the ledger with all of them', () => {
     const two = { updatedAt: 1, lines: [tflLine('district', false), tflLine('central', true)] };
     const { card } = board('tfl', renderTfl, two, tflCfg(['district', 'central']), [3, 2]);
-    expect(card.classList.contains('is-expandable')).toBe(false);
-    card.querySelector('.tfl--tap').click();
-    expect(readerOpen()).toBe(true);
-    expect(reader().textContent).toContain('district is a mess');
+    expect(card.querySelector('.card__more')).toBeNull();
+    expect(card.querySelectorAll('.tfl').length).toBe(2);
+    expect(card.classList.contains('is-expandable')).toBe(true);
+    card.querySelector('.tfl--alert').click();
+    expect(readerOpen()).toBe(false);
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelectorAll('.ledger__row').length).toBe(2);
+    expect(overlay().textContent).toContain('district is a mess');
+    expect(overlay().querySelector('.expand__note').textContent).toBe('1 of 2 lines with alerts');
+  });
+
+  it('a one-line, all-good card opens too, and its note reads in the singular', () => {
+    const one = { updatedAt: 1, lines: [tflLine('central', true)] };
+    const { card } = board('tfl', renderTfl, one, tflCfg(['central']), [3, 2]);
+    card.querySelector('.card__body').click();
+    expect(overlay().querySelectorAll('.ledger__row').length).toBe(1);
+    expect(overlay().querySelector('.expand__note').textContent).toBe('1 line good');
   });
 
   it('an unconfigured card taps into Settings', () => {
@@ -597,14 +613,29 @@ describe('Citi Bike expand', () => {
     expect(host.querySelector('.cbwell__n')).toBeNull();
   });
 
-  it('is inert when every station fits, and when none are configured', () => {
+  // Every card opens when tapped (Sean, 2026-11-13); the badge counts hidden
+  // stations and nothing else.
+  it('still opens the wells when every station fits', () => {
     const two = four.slice(0, 2);
     const { card } = board('citibike', renderCitibike, citibikeVm(two), citibikeCfg(two), [3, 2]);
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelectorAll('.cb').length).toBe(2);
+    expect(card.classList.contains('is-expandable')).toBe(true);
     card.querySelector('.card__body').click();
-    expect(isExpandOpen()).toBe(false);
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelectorAll('.cbwell').length).toBe(2);
+    expect(overlay().querySelector('.expand__note').textContent).toBe('2 stations');
+  });
 
+  it('a single station opens one well, with the note in the singular', () => {
+    const one = four.slice(0, 1);
+    const { card } = board('citibike', renderCitibike, citibikeVm(one), citibikeCfg(one), [3, 2]);
+    card.querySelector('.card__body').click();
+    expect(overlay().querySelectorAll('.cbwell').length).toBe(1);
+    expect(overlay().querySelector('.expand__note').textContent).toBe('1 station');
+  });
+
+  it('is inert when no stations are configured', () => {
     const empty = board('citibike', renderCitibike, { stations: [] }, citibikeCfg([]), [3, 2]);
     expect(empty.card.classList.contains('is-expandable')).toBe(false);
     empty.card.querySelector('.card__body').click();

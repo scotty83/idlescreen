@@ -307,19 +307,35 @@ describe('markets card tap', () => {
     expect(overlay().querySelector('.tile__closed')).toBeNull();
   });
 
-  it('is inert when nothing is hidden: no badge, no expansion', () => {
-    const { card } = board(vmOf(['^DJI', '^IXIC', '^GSPC']), [4, 8]);
+  // Every card opens when tapped (Sean, 2026-11-13). The badge counts hidden
+  // quotes and nothing else; it is no longer the condition for the wall.
+  it('still opens every ticker when nothing is hidden: no badge, but the wall', () => {
+    const symbols = ['^DJI', '^IXIC', '^GSPC'];
+    const { card } = board(vmOf(symbols), [4, 8]);
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelectorAll('.index').length).toBe(symbols.length); // the card shows them all
+    expect(card.classList.contains('is-expandable')).toBe(true);
     card.click();
-    expect(isExpandOpen()).toBe(false);
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelectorAll('.tile').length).toBe(symbols.length);
   });
 
-  it('drops the expansion when a refresh leaves nothing hidden', () => {
+  it('keeps the expansion and drops only the badge when a refresh leaves nothing hidden', () => {
     const { card } = board(vmOf(['^DJI', '^IXIC', '^GSPC', 'AAPL', 'MSFT', 'NVDA']));
-    expect(card.classList.contains('is-expandable')).toBe(true);
+    expect(card.querySelector('.card__more')).not.toBeNull();
     renderMarkets(card.querySelector('.card__body'), vmOf(['^DJI']), { clock24: false });
+    expect(card.querySelector('.card__more')).toBeNull();
+    expect(card.classList.contains('is-expandable')).toBe(true); // the destination does not move
+    card.click();
+    expect(overlay().querySelectorAll('.tile').length).toBe(1);
+  });
+
+  it('stays inert with no quotes to show (the unavailable line)', () => {
+    const { card } = board(vmOf(['^DJI', '^IXIC', '^GSPC', 'AAPL', 'MSFT', 'NVDA']));
+    renderMarkets(card.querySelector('.card__body'), vmOf([]), { clock24: false });
+    expect(card.textContent).toContain('Market data unavailable');
     expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.hasAttribute('tabindex')).toBe(false);
     card.click();
     expect(isExpandOpen()).toBe(false);
   });
@@ -644,21 +660,32 @@ describe('subway card tap', () => {
     expect(overlay().querySelectorAll('.sbalert').length).toBe(2);
   });
 
-  it('is inert when nothing is hidden: no badge, no expansion', () => {
+  // Every card opens when tapped (Sean, 2026-11-13): the commuter who taps the
+  // card on a good-service day gets the board. Only the badge tracks hidden rows.
+  it('still opens every line when nothing is hidden: no badge, but the board', () => {
     // A 4x8 card holds 15 rows, so a 5-line config hides nothing.
     const { card } = subwayBoard(subwayVm(1, 4), [4, 8]);
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelectorAll('.linestatus').length).toBe(5);
+    expect(card.classList.contains('is-expandable')).toBe(true);
+    expect(card.getAttribute('tabindex')).toBe('0');
     card.click();
-    expect(isExpandOpen()).toBe(false);
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelectorAll('.wall__bullets .bullet').length).toBe(4);
+    expect(overlay().querySelectorAll('.sbalert').length).toBe(1);
+    expect(overlay().querySelector('.expand__note').textContent).toBe(`1 of 5 lines with alerts · ${AS_OF}`);
   });
 
-  it('stays inert for an all-healthy card that fits (the badge and the tap agree)', () => {
+  it('opens the good-service band alone for an all-healthy card that fits', () => {
     const { card } = subwayBoard(subwayVm(0, 6), [3, 4]); // cap 6, six lines
     expect(card.querySelector('.card__more')).toBeNull();
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.classList.contains('is-expandable')).toBe(true);
     card.click();
-    expect(isExpandOpen()).toBe(false);
+    expect(isExpandOpen()).toBe(true);
+    expect(overlay().querySelector('.wall--good-only')).not.toBeNull();
+    expect(overlay().querySelectorAll('.wall__bullets .bullet').length).toBe(6);
+    expect(overlay().querySelector('.wall__alerts')).toBeNull();
+    expect(overlay().querySelector('.expand__note').textContent).toBe(AS_OF);
   });
 
   it('drops its title-line note and the alert count when every line is good', () => {
@@ -668,13 +695,15 @@ describe('subway card tap', () => {
     expect(overlay().querySelector('.wall__alerts')).toBeNull();
   });
 
-  it('drops the expansion when a refresh leaves nothing hidden', () => {
+  it('keeps the expansion and drops only the badge when a refresh leaves nothing hidden', () => {
     const { card } = subwayBoard(subwayVm(2, 10));
-    expect(card.classList.contains('is-expandable')).toBe(true);
+    expect(card.querySelector('.card__more')).not.toBeNull();
     renderSubway(card.querySelector('.card__body'), subwayVm(1, 2), { clock24: false });
-    expect(card.classList.contains('is-expandable')).toBe(false);
+    expect(card.querySelector('.card__more')).toBeNull();
+    expect(card.classList.contains('is-expandable')).toBe(true); // the destination does not move
     card.click();
-    expect(isExpandOpen()).toBe(false);
+    expect(overlay().querySelectorAll('.sbalert').length).toBe(1);
+    expect(overlay().querySelectorAll('.wall__bullets .bullet').length).toBe(2);
   });
 
   it('drops the expansion when the lines are unconfigured (setup prompt)', () => {

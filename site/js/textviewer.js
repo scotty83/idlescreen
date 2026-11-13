@@ -33,8 +33,9 @@ const DEFER_TO_EXPAND = '.linestatus__text, .talert__text';
 // ask the same question. Once the card itself opens a fuller view the per-row
 // reader is a redundant intermediate (the ledger those cards expand into
 // carries the very prose the reader used to show), so it steps aside and
-// leaves exactly one handler in play. A card with nothing hidden is not
-// expandable, and its rows keep opening the reader exactly as before.
+// leaves exactly one handler in play. A card with data now always opens
+// (Sean, 2026-11-13), so in practice the reader only answers on a card that
+// registered no view at all.
 export const defersToExpand = (el) => Boolean(el?.closest?.('.card.is-expandable'));
 
 const defaultTruncated = (el) =>

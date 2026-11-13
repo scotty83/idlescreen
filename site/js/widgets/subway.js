@@ -363,7 +363,7 @@ export function render(el, vm, cfg) {
   // than clipping — the capacity model and height caps assume this backstop.
   // Shrink only: there is nothing above the estimate to grow into, since the
   // rows past it were the ones the priority order already ruled out.
-  const shown = fitList(el, {
+  fitList(el, {
     id: meta.id,
     items: vm.lines,
     measure: true,
@@ -378,11 +378,13 @@ export function render(el, vm, cfg) {
       el.innerHTML = ranked.slice(0, n).map(rowHtml).join('');
     },
   });
-  const hidden = vm.lines.length - shown;
-  // Rows here are not tappable, so the whole card is the target and the +N badge
-  // is a passive signifier — the two must agree exactly: no badge, no expansion.
-  // The closure captures THIS render's vm, so the overlay always shows what the
-  // card was showing when it was tapped.
+  // Rows here are not tappable, so the whole card is the target, and it opens
+  // the status board whatever the card had room for (Sean, 2026-11-13): a
+  // commuter who taps the card on a good-service day gets the board, not a dead
+  // tap. fitList has already pinned the +N badge to the hidden rows alone, so
+  // the badge is information and the tap is the universal rule. The closure
+  // captures THIS render's vm, so the overlay always shows what the card was
+  // showing when it was tapped.
   const alerting = vm.lines.filter((l) => !l.ok).length;
   const note = [
     alerting ? `${alerting} of ${vm.lines.length} lines with alerts` : '',
@@ -390,17 +392,12 @@ export function render(el, vm, cfg) {
   ]
     .filter(Boolean)
     .join(' · ');
-  setExpandSource(
-    el,
-    hidden > 0
-      ? () => ({
-        title: meta.title,
-        note,
-        bodyHtml: statusBoard(vm.lines),
-        onOpen: (bodyEl) => fitStatusBoard(bodyEl, vm.lines),
-      })
-      : null,
-  );
+  setExpandSource(el, () => ({
+    title: meta.title,
+    note,
+    bodyHtml: statusBoard(vm.lines),
+    onOpen: (bodyEl) => fitStatusBoard(bodyEl, vm.lines),
+  }));
 }
 
 export async function fetchData(cfg, net) {

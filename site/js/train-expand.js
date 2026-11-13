@@ -3,13 +3,18 @@
 // they all render the same .train rows and must behave identically. After a
 // renderer has sliced to capacity, this fits the rows the browser can actually
 // hold, counts what the card is NOT showing, pins the quiet "+N" corner
-// badge, and registers the full two-column departures overlay.
+// badge, and registers the full departures overlay.
+//
+// The board opens whenever there is a departure to show, not only when some
+// are hidden (Sean, 2026-11-13): every card opens when tapped, which is the
+// rule the board teaches, and a commuter who taps a card that fits its trains
+// still gets the board at reading size. Only the badge tracks what is hidden.
 //
 // The whole card is the target, the markets grammar (Sean, 2026-07-31): the
 // first cut used a pill-only trigger whose touch-target reserve cost a
 // visible train row on exactly-filled cards, a worse trade than reserving
-// rail rows for a hypothetical future row tap. The badge's "more" is the tap
-// invitation. The news wave, whose rows really ARE tappable, then went the
+// rail rows for a hypothetical future row tap. The news wave, whose rows
+// really ARE tappable, then went the
 // other way and punched its live rows out of the card target (the engine's
 // `except`), so no narrowing selector was ever wanted and the engine no longer
 // carries one.
@@ -31,7 +36,9 @@ const TRAINS_ONE_COLUMN = 6;
 // strings are captured per render, so the tap-time snapshot is this render's.
 // `alerts` are the card's banner alerts: each banner becomes a subview that
 // reads THAT alert full screen (header plus the digest's long description),
-// while every other tap on the card opens the schedule.
+// while every other tap on the card opens the schedule. An empty `rows` (no
+// departures, or a setup prompt) registers no schedule, so that card surface
+// stays inert while any banner on it still reads.
 export function wireTrainExpand(el, { title, note = '', rows, alerts = [] }) {
   fitTrainRows(el);
   const hidden = rows.length - (el.querySelectorAll?.('.train').length ?? 0);
@@ -56,7 +63,7 @@ export function wireTrainExpand(el, { title, note = '', rows, alerts = [] }) {
     : null;
   setExpandSource(
     el,
-    hidden > 0
+    rows.length
       ? () => {
           // The board sizes to its content (Sean's pick, mockup A): up to six
           // trains fill one grand centered column; beyond that the same rows

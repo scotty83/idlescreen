@@ -383,18 +383,18 @@ export function render(el, vm, cfg) {
         : '<div class="empty">Market data unavailable</div>';
     },
   });
-  const hidden = indices.length - shown;
-  // Rows here are not tappable, so the whole card is the target and the +N badge
-  // is a passive signifier — the two must agree exactly: no badge, no expansion.
-  // The closure captures THIS render's vm, so the overlay always shows what the
-  // card was showing when it was tapped, header note included. The wall marks
-  // its own closed tiles (tileWall) whatever this card's size: every tile has
-  // a name line with room for the label, which the 2-row card's rows lack.
+  // Rows here are not tappable, so the whole card is the target, and it opens
+  // the wall whenever the card drew a quote, whatever it had room for (Sean,
+  // 2026-11-13): every card opens when tapped. The +N badge fitList pinned
+  // counts hidden quotes and nothing else; a card with no quotes drew the
+  // "unavailable" line and stays inert. The closure captures THIS render's vm,
+  // so the overlay always shows what the card was showing when it was tapped,
+  // header note included. The wall marks its own closed tiles (tileWall)
+  // whatever this card's size: every tile has a name line with room for the
+  // label, which the 2-row card's rows lack.
   setExpandSource(
     el,
-    shown && hidden > 0
-      ? () => ({ title: meta.title, note, bodyHtml: tileWall(indices) })
-      : null,
+    shown ? () => ({ title: meta.title, note, bodyHtml: tileWall(indices) }) : null,
   );
 }
 
