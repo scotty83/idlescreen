@@ -1,6 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { isExpressRoute } from '../tools/build-express-bus-data.js';
+
+// Hoisted above the import: the build script used to run on import, pulling six
+// MTA GTFS zips and rewriting site/data/express-bus.json on every test run. CI
+// went red the day MTA started answering its runners 403 (2026-11-17).
+const fetchSpy = vi.hoisted(() => {
+  const spy = vi.fn(async () => { throw new Error('a unit test must not reach the network'); });
+  vi.stubGlobal('fetch', spy);
+  return spy;
+});
+
+describe('importing the build script', () => {
+  it('does not start a build', () => {
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
 
 describe('isExpressRoute', () => {
   it('matches express prefixes only', () => {

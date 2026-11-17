@@ -6,6 +6,7 @@ import { writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // GTFS feed + the SIRI LineRef agency prefix for its routes. VERIFY each URL
 // returns a GTFS zip at build time; the MTA dev portal has been migrating to
@@ -40,51 +41,58 @@ async function download(url) {
   return p;
 }
 
-const routes = {};          // id -> { id, lineRef, dirStops: {0:Map,1:Map} }
-const stops = {};           // stopId -> name
+// The whole build: six downloads, then a write to site/data/express-bus.json.
+// Runs only when this file is the script node was started with (see the foot of
+// the file), never on import, so a test can borrow isExpressRoute for free.
+export async function build() {
+  const routes = {};          // id -> { id, lineRef, dirStops: {0:Map,1:Map} }
+  const stops = {};           // stopId -> name
 
-for (const feed of FEEDS) {
-  const zip = await download(feed.url);
-  const routeRows = table(zip, 'routes.txt').filter((r) => isExpressRoute(r.route_short_name));
-  if (!routeRows.length) continue;
-  const routeById = Object.fromEntries(routeRows.map((r) => [r.route_id, r.route_short_name]));
-  for (const r of routeRows) {
-    routes[r.route_short_name] ??= { id: r.route_short_name, lineRef: feed.prefix + r.route_short_name, dirStops: { 0: new Map(), 1: new Map() } };
+  for (const feed of FEEDS) {
+    const zip = await download(feed.url);
+    const routeRows = table(zip, 'routes.txt').filter((r) => isExpressRoute(r.route_short_name));
+    if (!routeRows.length) continue;
+    const routeById = Object.fromEntries(routeRows.map((r) => [r.route_id, r.route_short_name]));
+    for (const r of routeRows) {
+      routes[r.route_short_name] ??= { id: r.route_short_name, lineRef: feed.prefix + r.route_short_name, dirStops: { 0: new Map(), 1: new Map() } };
+    }
+    const trips = table(zip, 'trips.txt').filter((t) => routeById[t.route_id]);
+    const tripInfo = Object.fromEntries(trips.map((t) => [t.trip_id, { route: routeById[t.route_id], dir: Number(t.direction_id) || 0, headsign: t.trip_headsign }]));
+    const headsign = {};      // `${route}|${dir}` -> first headsign seen
+    for (const t of trips) headsign[`${tripInfo[t.trip_id].route}|${tripInfo[t.trip_id].dir}`] ??= t.trip_headsign;
+    const stopNames = Object.fromEntries(table(zip, 'stops.txt').map((s) => [s.stop_id, s.stop_name]));
+    for (const st of table(zip, 'stop_times.txt')) {
+      const info = tripInfo[st.trip_id];
+      if (!info) continue;
+      const r = routes[info.route];
+      r.headsigns ??= {};
+      r.headsigns[info.dir] ??= headsign[`${info.route}|${info.dir}`] || '';
+      if (!r.dirStops[info.dir].has(st.stop_id)) r.dirStops[info.dir].set(st.stop_id, Number(st.stop_sequence));
+      if (stopNames[st.stop_id]) stops[st.stop_id] = stopNames[st.stop_id];
+    }
   }
-  const trips = table(zip, 'trips.txt').filter((t) => routeById[t.route_id]);
-  const tripInfo = Object.fromEntries(trips.map((t) => [t.trip_id, { route: routeById[t.route_id], dir: Number(t.direction_id) || 0, headsign: t.trip_headsign }]));
-  const headsign = {};      // `${route}|${dir}` -> first headsign seen
-  for (const t of trips) headsign[`${tripInfo[t.trip_id].route}|${tripInfo[t.trip_id].dir}`] ??= t.trip_headsign;
-  const stopNames = Object.fromEntries(table(zip, 'stops.txt').map((s) => [s.stop_id, s.stop_name]));
-  for (const st of table(zip, 'stop_times.txt')) {
-    const info = tripInfo[st.trip_id];
-    if (!info) continue;
-    const r = routes[info.route];
-    r.headsigns ??= {};
-    r.headsigns[info.dir] ??= headsign[`${info.route}|${info.dir}`] || '';
-    if (!r.dirStops[info.dir].has(st.stop_id)) r.dirStops[info.dir].set(st.stop_id, Number(st.stop_sequence));
-    if (stopNames[st.stop_id]) stops[st.stop_id] = stopNames[st.stop_id];
+
+  const out = {
+    routes: Object.values(routes).sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true })).map((r) => ({
+      id: r.id,
+      lineRef: r.lineRef,
+      dirs: [0, 1]
+        .filter((d) => r.dirStops[d].size)
+        .map((d) => ({
+          id: d,
+          headsign: (r.headsigns?.[d] || '').trim(),
+          stops: [...r.dirStops[d].entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id),
+        })),
+    })),
+    stops,
+  };
+
+  if (out.routes.length < 55 || out.routes.length > 95) {
+    throw new Error(`express route count ${out.routes.length} outside 55-95 — verify FEEDS + isExpressRoute`);
   }
+  await writeFile(new URL('../site/data/express-bus.json', import.meta.url), JSON.stringify(out));
+  console.log(`express-bus: ${out.routes.length} routes, ${Object.keys(out.stops).length} stops`);
+  console.log('routes:', out.routes.map((r) => r.id).join(', '));
 }
 
-const out = {
-  routes: Object.values(routes).sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true })).map((r) => ({
-    id: r.id,
-    lineRef: r.lineRef,
-    dirs: [0, 1]
-      .filter((d) => r.dirStops[d].size)
-      .map((d) => ({
-        id: d,
-        headsign: (r.headsigns?.[d] || '').trim(),
-        stops: [...r.dirStops[d].entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id),
-      })),
-  })),
-  stops,
-};
-
-if (out.routes.length < 55 || out.routes.length > 95) {
-  throw new Error(`express route count ${out.routes.length} outside 55-95 — verify FEEDS + isExpressRoute`);
-}
-await writeFile(new URL('../site/data/express-bus.json', import.meta.url), JSON.stringify(out));
-console.log(`express-bus: ${out.routes.length} routes, ${Object.keys(out.stops).length} stops`);
-console.log('routes:', out.routes.map((r) => r.id).join(', '));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await build();
