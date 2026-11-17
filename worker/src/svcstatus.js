@@ -362,15 +362,43 @@ export function mapGoogle(json, nowMs) {
   };
 }
 
+// Every live component in the dashboard's tree, groups and their children alike.
+const webexComponents = (list) => (Array.isArray(list) ? list : [])
+  .flatMap((c) => (!c || c.deleted ? [] : [c, ...webexComponents(c.components)]));
+
 export function mapWebex(json) {
   // Webex lists routine scheduled maintenance under unResolvedIncidents —
   // permanent yellow would make the signal worthless, so maintenance is not
   // "degraded" here (fixture: 3 open entries, all maintenance → ok).
   const isMaint = (i) => /maintenance/i.test(String(i.impact ?? '')) || /maintenance/i.test(String(i.incidentType ?? ''));
-  // The feed always carries unResolvedIncidents as an array (empty when calm).
-  // A missing or non-array field is a broken envelope, not "no open incidents":
-  // throw so the row reports unknown rather than fake green (see mapGoogle).
-  if (!Array.isArray(json?.unResolvedIncidents)) throw new Error('webex: expected an unResolvedIncidents array');
+  // With nothing open the feed sends unResolvedIncidents: null, not [] (seen
+  // live 2026-11-17, a day after the last incident closed; fixture
+  // svc-webex-calm.json). That null reads as "no open incidents" only inside an
+  // envelope that is recognizably the dashboard, one carrying its component
+  // tree. Anything else (key missing, wrong type, an error object answered
+  // with 200) is a broken envelope: throw so the row reports unknown rather
+  // than fake green (see mapGoogle).
+  const calm = json?.unResolvedIncidents === null && Array.isArray(json.components) && json.components.length > 0;
+  if (!calm && !Array.isArray(json?.unResolvedIncidents)) throw new Error('webex: expected an unResolvedIncidents array');
+  if (calm) {
+    // A null list could also be the feed's incident query failing quietly, so
+    // the component tree gets the last word: a component that is neither
+    // operational nor in maintenance degrades the row and names itself.
+    const down = webexComponents(json.components)
+      .filter((c) => c.status && !/operational|maintenance/i.test(String(c.status)));
+    if (!down.length) return { state: 'ok', note: 'All systems operational', incidents: [] };
+    // A group repeats its children's trouble; name the children when there are any.
+    const leaves = down.filter((c) => c.isGroup !== 'Y');
+    const named = (leaves.length ? leaves : down).slice(0, 3);
+    const words = (c) => text(String(c.status).replace(/_/g, ' '));
+    return {
+      state: down.some((c) => /major|critical|outage/i.test(String(c.status))) ? 'major' : 'minor',
+      note: `${text(named[0].componentName)}: ${words(named[0])}`,
+      incidents: named.map((c) => ({
+        title: text(c.componentName), since: String(c.lastModifiedTime ?? ''), update: words(c),
+      })),
+    };
+  }
   const open = json.unResolvedIncidents.filter((i) => !i.deleted && !isMaint(i));
   if (!open.length) return { state: 'ok', note: 'All systems operational', incidents: [] };
   return {

@@ -2192,6 +2192,7 @@ const greenGraph = () => ({
 });
 import googleFx from './fixtures/svc-google.json';
 import webexFx from './fixtures/svc-webex.json';
+import webexCalmFx from './fixtures/svc-webex-calm.json';
 import awsFx from './fixtures/svc-aws.json';
 import { decodeBomJson } from '../../worker/src/svcstatus.js';
 import { htmlToText } from '../../worker/src/htmltext.js';
@@ -2650,6 +2651,31 @@ describe('service status adapters', () => {
     expect(out.state).toBe('major');
     expect(out.note).toBe('Meetings join failures');
   });
+  it('webex: a null incident list inside a real dashboard envelope is the calm state', () => {
+    // The live payload of 2026-11-17: nothing open, so unResolvedIncidents is
+    // null rather than []. The fixture keeps the Webex Calling group whose
+    // under_maintenance flag has sat unchanged since May, which must not degrade.
+    expect(webexCalmFx.unResolvedIncidents).toBeNull();
+    expect(mapWebex(webexCalmFx)).toEqual({ state: 'ok', note: 'All systems operational', incidents: [] });
+  });
+  it('webex: with a null list, a component in trouble still degrades the row', () => {
+    const tree = (status) => ({
+      unResolvedIncidents: null,
+      components: [{
+        componentName: 'Webex Meetings', isGroup: 'Y', status, lastModifiedTime: 'g',
+        components: [
+          { componentName: 'Join <b>meeting</b>', isGroup: 'N', status, lastModifiedTime: 't' },
+          { componentName: 'Retired', isGroup: 'N', status, deleted: true },
+          { componentName: 'Recording', isGroup: 'N', status: 'operational' },
+        ],
+      }],
+    });
+    const major = mapWebex(tree('major_outage'));
+    expect(major.state).toBe('major');
+    expect(major.note).toBe('Join meeting: major outage'); // the child, not its group; sanitized
+    expect(major.incidents).toEqual([{ title: 'Join meeting', since: 't', update: 'major outage' }]);
+    expect(mapWebex(tree('degraded_performance')).state).toBe('minor');
+  });
   it('aws: stale events are ok now, recent event degrades', () => {
     expect(mapAws(awsFx, Date.now()).state).toBe('ok'); // events months old
     expect(mapAws([], Date.now()).state).toBe('ok'); // empty array is all-clear
@@ -2667,6 +2693,11 @@ describe('service status adapters', () => {
     expect(() => mapAws({}, Date.now())).toThrow(/expected an events array/);
     expect(() => mapWebex({})).toThrow(/expected an unResolvedIncidents array/);
     expect(() => mapWebex({ unResolvedIncidents: 'nope' })).toThrow(/expected an unResolvedIncidents array/);
+    // null is the calm state only alongside the component tree; on its own, or
+    // beside an empty or missing tree, it is still a broken envelope.
+    expect(() => mapWebex({ unResolvedIncidents: null })).toThrow(/expected an unResolvedIncidents array/);
+    expect(() => mapWebex({ unResolvedIncidents: null, components: [] })).toThrow(/expected an unResolvedIncidents array/);
+    expect(() => mapWebex({ unResolvedIncidents: null, components: 'nope' })).toThrow(/expected an unResolvedIncidents array/);
   });
 });
 
