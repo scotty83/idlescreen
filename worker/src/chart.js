@@ -297,21 +297,26 @@ export function parseChartPage(html) {
   return { b, tags };
 }
 
-// Time limits, sized together: the health monitor gives a probe 13s and a
-// board gives a fetch 15s, and a cold refresh spends the listing wait, then
-// the classification budget, then the last chart page started just inside it.
-// 5s + 3.5s + 3.5s keeps the worst case at 12s; a normal one takes two or three.
+// Time limits. The health monitor gives a probe 13s and a board gives a fetch
+// 15s, so one request gets REQUEST_BUDGET_MS for everything it asks Statista:
+// the listing first, then chart pages for whatever is left, each page's own
+// timeout cut down to the time remaining. That leaves room to parse, store and
+// answer even when Statista is slow, and when the health cron's seventeen
+// other probes are sharing this invocation's six connections. A normal request
+// takes two or three seconds.
+const REQUEST_BUDGET_MS = 9000;
 const LISTING_TIMEOUT_MS = 5000;
 const PAGE_TIMEOUT_MS = 3500;
+const PAGE_MIN_MS = 500; // with less than this left, a chart page is not worth starting
 // The taxonomy sits in the first ~12KB of a ~315KB page; reading the rest
 // would spend bandwidth and CPU on markup nobody looks at.
 const HEAD_BYTES = 64 * 1024;
 
-async function classifyOne(path) {
+async function classifyOne(path, timeoutMs) {
   const res = await fetch(`${SITE}${path}`, {
     redirect: 'follow',
     headers: HEADERS,
-    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     await res.body?.cancel().catch(() => {});
@@ -341,9 +346,23 @@ const INDEX_FRESH_MS = 30 * 60 * 1000; // a newer listing is worth a look every 
 const INDEX_KEEP_S = 30 * 86400; // the Cache API may evict sooner; a rebuild just costs a cold refresh
 const INDEX_CAP = 300;
 const SERVE_N = 10;
-const CLASSIFY_MAX = 48; // chart pages per refresh: a cold index fills over a few refreshes
+// Chart pages per pass: a cold index fills over a few passes. 32, with the two
+// listing pages and the cache calls around them, also keeps a pass inside the
+// 50 subrequests a Free-plan worker gets (this one is on the paid plan, but
+// the repo is public and a self-hosted copy may not be).
+const CLASSIFY_MAX = 32;
+// A request for the general list needs no topics, so it reads one wave of
+// chart pages and no more: enough to keep a quiet colo's index moving and to
+// tell the health check whether chart pages answer at all, without the health
+// cron (which asks for the general list every 20 minutes, in a colo that may
+// be cold each time) sending Statista a full pass on every run.
+const CLASSIFY_GENERAL = 6;
 const CLASSIFY_PARALLEL = 6;
-const CLASSIFY_BUDGET_MS = 3500; // no new chart page starts after this, so a slow Statista can't stall a board
+// A pass that has seen this many failures and not one success has found
+// Statista refusing or hanging, not a bad page: it stops, and the index is
+// marked stalled so the catch-up pass waits for the next listing refresh
+// instead of sending six more doomed requests on every poll in between.
+const STALL_AFTER = 6; // plus whatever is in flight when the sixth lands: eleven pages at most
 // A chart page that failed is asked again later, never given up on: the wait
 // doubles from half an hour (so the first retry is the next refresh) to a day.
 // A count that stopped at "three strikes" would turn an afternoon of Statista
@@ -354,6 +373,7 @@ const RETRY_BASE_MS = 30 * 60 * 1000;
 const RETRY_MAX_MS = 24 * 3600 * 1000;
 
 const indexKey = (origin) => new Request(`${origin}/__cache/chart-index/v1`);
+const unclassified = (c) => c.cls == null;
 const untried = (c) => c.cls == null && !c.tries;
 const due = (c, now) =>
   c.cls == null && (!c.tries || now - (c.triedAt ?? 0) >= Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (c.tries - 1)));
@@ -371,11 +391,56 @@ async function readIndex(origin) {
 
 async function fetchListing(url) {
   const res = await fetch(url, { redirect: 'follow', headers: HEADERS, signal: AbortSignal.timeout(LISTING_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`statista listing ${res.status}`);
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {}); // an unread body would keep its connection
+    throw new Error(`statista listing ${res.status}`);
+  }
   return parseListing(await res.text());
 }
 
-async function writeIndex(origin, index) {
+// One refresh at a time. Every topic key (17 of them) expires on its own hour
+// and a floor of boards waking together all miss at once; unguarded, each of
+// those requests would read the same chart pages, a burst Statista could
+// fairly answer by refusing this worker. The claim is a short-lived Cache API
+// entry holding its owner's token, so it works across isolates in the colo.
+// The Cache API has no compare-and-set, so the claim is checked rather than
+// trusted: a claimant reads its token back before working (of two that wrote
+// a moment apart, only the later one finds its own), reads the index again
+// (the other may have just finished), checks once more before storing (so a
+// loser that slipped through cannot overwrite the winner's index), and deletes
+// the claim only while it is still its own. What is left is a narrow window
+// that costs a duplicate pass, never a wrong answer. A promise shared between
+// requests would be tighter, but one request awaiting I/O that another started
+// is exactly what workerd warns against: if the starter is cancelled, the
+// waiter hangs.
+const BUSY_S = 30; // well past REQUEST_BUDGET_MS; released as soon as the work ends anyway
+const busyKey = (origin) => new Request(`${origin}/__cache/chart-index/busy`);
+const holder = async (origin) => {
+  try {
+    const hit = await caches.default.match(busyKey(origin));
+    return hit ? await hit.text() : null;
+  } catch {
+    return null;
+  }
+};
+// The token when this request now holds the refresh, null when another does
+// (or when the cache cannot say, in which case nothing could be stored anyway).
+async function claim(origin) {
+  if (await holder(origin)) return null;
+  const token = crypto.randomUUID();
+  try {
+    await caches.default.put(busyKey(origin), new Response(token, { headers: { 'Cache-Control': `max-age=${BUSY_S}` } }));
+  } catch {
+    return null;
+  }
+  return (await holder(origin)) === token ? token : null;
+}
+async function release(origin, token) {
+  if ((await holder(origin)) === token) await caches.default.delete(busyKey(origin)).catch(() => {});
+}
+
+async function writeIndex(origin, index, token) {
+  if ((await holder(origin)) !== token) return; // the claim passed to another request: its index stands
   try {
     await caches.default.put(indexKey(origin), new Response(JSON.stringify(index), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${INDEX_KEEP_S}` },
@@ -387,40 +452,48 @@ async function writeIndex(origin, index) {
 }
 
 // Classify the newest unclassified charts that `want` selects, in place, a few
-// at a time. One failure costs that chart a try and nothing else.
-async function classify(charts, want = due) {
-  const started = Date.now();
-  const queue = charts.filter((c) => want(c, started)).slice(0, CLASSIFY_MAX);
+// at a time, until `max` are done or the request's deadline is near. One
+// failure costs that chart a try and nothing else. Returns true when the pass
+// stalled (see STALL_AFTER).
+async function classify(charts, { want = due, max, deadline }) {
+  const queue = charts.filter((c) => want(c, Date.now())).slice(0, max);
   let next = 0;
+  let ok = 0;
+  let failed = 0;
+  const stalled = () => ok === 0 && failed >= STALL_AFTER;
   const lane = async () => {
-    while (next < queue.length && Date.now() - started < CLASSIFY_BUDGET_MS) {
+    while (next < queue.length && !stalled()) {
+      const left = deadline - Date.now();
+      if (left < PAGE_MIN_MS) return;
       const c = queue[next];
       next += 1;
       try {
-        const cls = await classifyOne(c.path);
+        const cls = await classifyOne(c.path, Math.min(PAGE_TIMEOUT_MS, left));
         if (cls) {
           c.cls = cls;
+          ok += 1;
           continue;
         }
         console.warn(`[chart] ${c.id}: no branchen targeting on the chart page`);
       } catch (err) {
         console.warn(`[chart] ${c.id}: chart page failed: ${String(err?.message ?? err)}`);
       }
+      failed += 1;
       c.tries = (c.tries ?? 0) + 1;
       c.triedAt = Date.now();
     }
   };
   await Promise.all(Array.from({ length: CLASSIFY_PARALLEL }, lane));
+  return stalled();
 }
 
-// Re-read the listing and fold it into the index. A failed page 1 throws even
-// when an old index is at hand: serving that would hand cached() a "fresh"
-// answer built from a listing that may be weeks old, where throwing lets it
-// serve the route's own last-good copy marked stale, or the error. `light`
-// (another request holds the refresh, see loadIndex) skips the chart pages
-// and the write: this request still answers from the current listing, and
-// leaves classifying and storing to the one already doing it.
-async function refreshIndex(origin, old, { light = false } = {}) {
+// Re-read the listing and fold it into the old index: listed charts first
+// (carrying over what is already known about each), then charts that have
+// scrolled off the listing. A failed page 1 throws even when an old index is
+// at hand: serving that would hand cached() a "fresh" answer built from a
+// listing that may be weeks old, where throwing lets it serve the route's own
+// last-good copy marked stale, or the error.
+async function readListing(old) {
   const [p1, p2] = await Promise.allSettled([fetchListing(LISTING), fetchListing(LISTING_P2)]);
   if (p1.status === 'rejected') throw p1.reason;
   if (p2.status === 'rejected') {
@@ -459,66 +532,46 @@ async function refreshIndex(origin, old, { light = false } = {}) {
   // Newest first; Array.prototype.sort is stable, so a date tie keeps the
   // listing's own order (which is by update time).
   merged.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-  const charts = merged.slice(0, INDEX_CAP);
-  if (light) return { builtAt: Date.now(), charts };
-  await classify(charts);
-  const index = { builtAt: Date.now(), charts };
-  await writeIndex(origin, index);
-  return index;
+  return merged.slice(0, INDEX_CAP);
 }
 
+const isFresh = (index) => Boolean(index) && Date.now() - index.builtAt < INDEX_FRESH_MS;
+// Nothing to do before the next listing refresh: fresh, and either every chart
+// has had its turn or the last pass stalled and more would only stall again.
+const settled = (index) => isFresh(index) && (index.stalled === true || !index.charts.some(untried));
+
+// The index to answer from. `max` is how many chart pages this request may
+// read (see CLASSIFY_MAX and CLASSIFY_GENERAL).
+//
 // Inside the fresh window the listing is not re-read, but charts that were
-// never tried still get their turn: a cold colo's first refresh stops at
-// CLASSIFY_MAX, and without this the rest would wait out the whole window
-// while topics served their fallback (see the catch-up note in fetchChart).
-// Only never-tried charts: a page that failed waits out its retry delay (see
-// RETRY_BASE_MS), so Statista trouble is not answered with a retry on every
-// poll. builtAt is kept, so the listing refresh stays on schedule.
-async function catchUp(origin, index) {
-  await classify(index.charts, untried);
-  await writeIndex(origin, index);
-  return index;
-}
-
-// One refresh at a time. Every topic key (17 of them) expires on its own hour
-// and a floor of boards waking together all miss at once; unguarded, each of
-// those requests would read the same four dozen chart pages, a burst Statista
-// could fairly answer by refusing this worker. The claim is a short-lived
-// Cache API entry, so it holds across isolates in the colo. It is not atomic
-// (two requests a few milliseconds apart can both claim), which costs one
-// duplicate pass, not correctness. A promise shared between requests would be
-// tighter, but one request awaiting I/O that another started is exactly what
-// workerd warns against: if the starter is cancelled, the waiter hangs.
-const BUSY_S = 30; // longer than the slowest refresh; released as soon as it ends anyway
-const busyKey = (origin) => new Request(`${origin}/__cache/chart-index/busy`);
-const isBusy = async (origin) => {
+// never tried still get their turn (the catch-up pass): a cold colo's first
+// refresh stops at `max`, and without this the rest would wait out the whole
+// window while topics served their fallback (see the note in fetchChart). Only
+// never-tried charts: a page that failed waits out its retry delay, and
+// builtAt is kept, so the listing refresh stays on schedule.
+//
+// When another request holds the refresh, this one does not wait for it. A
+// fresh index answers as it stands. A missing or aged one still owes this
+// request the current listing, so it reads that, classifies nothing and stores
+// nothing, and says so (`light`), which makes the answer provisional (see
+// fetchChart).
+async function loadIndex(origin, max, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  let old = await readIndex(origin);
+  if (settled(old)) return old;
+  const token = await claim(origin);
+  if (!token) return isFresh(old) ? old : { builtAt: Date.now(), charts: await readListing(old), light: true };
   try {
-    return Boolean(await caches.default.match(busyKey(origin)));
-  } catch {
-    return false;
-  }
-};
-const claim = (origin) =>
-  caches.default
-    .put(busyKey(origin), new Response('1', { headers: { 'Cache-Control': `max-age=${BUSY_S}` } }))
-    .catch(() => {});
-const release = (origin) => caches.default.delete(busyKey(origin)).catch(() => {});
-
-async function loadIndex(origin) {
-  const old = await readIndex(origin);
-  const fresh = old && Date.now() - old.builtAt < INDEX_FRESH_MS;
-  if (fresh && !old.charts.some(untried)) return old;
-  if (await isBusy(origin)) {
-    // Someone is already at the chart pages. A fresh index answers as it
-    // stands; a missing or aged one still owes this request the current
-    // listing, just without a second pass over the chart pages.
-    return fresh ? old : refreshIndex(origin, old, { light: true });
-  }
-  await claim(origin);
-  try {
-    return await (fresh ? catchUp(origin, old) : refreshIndex(origin, old));
+    old = await readIndex(origin); // whoever held the claim before may have just finished
+    if (settled(old)) return old;
+    const fresh = isFresh(old);
+    const charts = fresh ? old.charts : await readListing(old);
+    const stalled = await classify(charts, { want: fresh ? untried : due, max, deadline });
+    const index = { builtAt: fresh ? old.builtAt : Date.now(), charts, ...(stalled ? { stalled: true } : {}) };
+    await writeIndex(origin, index, token);
+    return index;
   } finally {
-    await release(origin);
+    await release(origin, token);
   }
 }
 
@@ -536,12 +589,14 @@ const served = (c) => ({
 
 // The newest charts for a topic ('' = the newest overall). A topic with no
 // classified chart falls back to the general list, flagged, so a board never
-// blanks on a quiet topic.
-export async function fetchChart(topic = '', { origin } = {}) {
+// blanks on a quiet topic. budgetMs is the route's to leave alone; tests
+// shorten it to see the deadline hold without waiting nine seconds.
+export async function fetchChart(topic = '', { origin, budgetMs = REQUEST_BUDGET_MS } = {}) {
   if (!origin) throw new Error('chart: origin required');
   const t = resolveTopic(topic);
   if (t === null) throw new Error(`statista: unknown topic "${topic}"`);
-  const { charts: all = [] } = await loadIndex(origin);
+  const index = await loadIndex(origin, t ? CLASSIFY_MAX : CLASSIFY_GENERAL, budgetMs);
+  const all = index.charts ?? [];
   if (!all.length) throw new Error('statista: the chart index is empty');
   let picked = all.slice(0, SERVE_N);
   let fallback = false;
@@ -554,22 +609,20 @@ export async function fetchChart(topic = '', { origin } = {}) {
   // Keep `chart` (the newest) beside `charts[]` so a client that only reads the
   // legacy singular field keeps working when this worker deploys ahead of the
   // new widget (e.g. prod worker updated, prod chart widget not yet).
-  // classifiedTo is the date of the newest chart that has a classification.
-  // The health check reads it against the newest chart's date: topics fed by
-  // an index nobody can classify any more (Statista refusing the chart pages,
-  // or reshaping them) would otherwise go quietly stale behind a healthy
-  // general list.
-  const out = { chart: charts[0], charts, topic: t, fallback, classifiedTo: all.find((c) => c.cls)?.date ?? null };
-  // Catch-up. A cold colo's first refresh classifies at most CLASSIFY_MAX
-  // charts, so a quiet topic can come back empty only because its charts are
-  // still waiting their turn. Cached normally, that fallback would pin the
-  // newest-overall list on the topic for the route's full hour. partial: true
-  // makes cached() keep it for at most 120s and never write it over the 24h
-  // backup, so the next polls reach loadIndex again, each classifying the next
-  // batch (catchUp), and the topic converges on its own charts within minutes.
-  // Once every chart has had its turn, a fallback is the honest answer and
-  // caches for the full hour (a chart waiting out a retry delay will not be
-  // asked again inside two minutes, so it does not count here).
-  if (fallback && all.some(untried)) out.partial = true;
+  const out = { chart: charts[0], charts, topic: t, fallback };
+  // Provisional answers. partial: true makes cached() keep an answer for at
+  // most 120s and never write it over the route's 24h backup, which is right
+  // for two kinds of answer here:
+  //   - a topic fallback while any chart is still unclassified. The topic may
+  //     be empty only because its charts are waiting their turn (a cold colo
+  //     fills over a few passes, and each poll that gets past the 120s runs
+  //     the next one) or because Statista is refusing the chart pages; either
+  //     way the newest-overall list must not sit on the topic for an hour, and
+  //     must never replace a backup that holds the topic's real charts. Once
+  //     every chart is classified, a fallback is the honest answer and caches
+  //     for the full hour.
+  //   - any answer built from a light index: its charts carry no topics yet,
+  //     and the request that held the refresh is about to store better.
+  if (index.light || (fallback && all.some(unclassified))) out.partial = true;
   return out;
 }

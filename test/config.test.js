@@ -331,6 +331,13 @@ describe('chart config (v3 additive)', () => {
     expect(normalizeConfig({ chart: { topics: ['business', 'finance'] } }).chart.topics).toEqual(['finance']);
     // the legacy single-topic field takes the alias too
     expect(normalizeConfig({ chart: { topic: 'environment' } }).chart.topics).toEqual(['energy']);
+    // and reads a dropped topic the way the list form does: no topic, not every topic
+    expect(normalizeConfig({ chart: { topic: 'business' } }).chart.topics).toEqual([]);
+    expect(normalizeConfig({ chart: { topic: 'science' } }).chart.topics).toEqual([]);
+    // a saved config can hold anything; none of it may throw
+    const hostile = { toString: null, valueOf: null };
+    expect(normalizeConfig({ chart: { topics: [hostile, 7, null, ['energy'], 'finance'] } }).chart.topics).toEqual(['finance']);
+    expect(normalizeConfig({ chart: { topic: hostile } }).chart.topics).toEqual(ALL_SLUGS);
   });
   it('an old all-19-topics selection normalizes to the new all-on default (and stays off the wire)', async () => {
     const OLD_ALL = ['artificial intelligence', 'business', 'consumer goods', 'e-commerce', 'economy', 'energy',

@@ -39,11 +39,6 @@ const APOD_IMAGE_PATH = /\.(?:jpe?g|png|gif|webp)$/i;
 // weekend. Two weeks covers a holiday gap and still catches a listing that
 // froze.
 const CHART_DATE_MAX_MS = 14 * 86400 * 1000;
-// How far the newest CLASSIFIED chart may trail the newest chart. Several
-// charts post each weekday and a failed chart page is retried within the day,
-// so a healthy index trails by nothing; three days of charts with no
-// classification among them means the chart pages stopped answering.
-const CHART_CLASSIFY_LAG_MAX_MS = 3 * 86400 * 1000;
 
 export const CHECKS = [
   {
@@ -274,10 +269,17 @@ export const CHECKS = [
     //
     // A third failure hides behind both: topics come from each chart's own
     // page, a second upstream the general list never needs. If Statista
-    // refuses those pages (or reshapes them), the general list stays perfectly
-    // healthy while every topic drifts onto old charts and then onto the
-    // fallback. classifiedTo, the date of the newest chart the index could
-    // classify, is the one field that shows it.
+    // refuses those pages, empties their industry list or renumbers it, the
+    // general list stays perfectly healthy while every topic drifts onto old
+    // charts and then onto the fallback. So at least one of the charts served
+    // (the ten newest) must have earned a topic. Counted in charts, not days,
+    // so a weekend or a holiday cannot trip it, and counted in topics, not
+    // classifications, so a page that still answers but no longer says
+    // anything useful is caught too. Around a fifth of charts sit in no topic
+    // by nature (elections, say); ten in a row would be a first. The one
+    // answer excused is a partial one: on this key that only ever means the
+    // request found another already reading the chart pages and answered from
+    // the listing alone (see loadIndex in chart.js); it lives two minutes.
     name: 'chart',
     path: '/chart',
     maxStaleSec: CHART_TTL_S + STALE_MAX,
@@ -290,11 +292,9 @@ export const CHECKS = [
       if (u.protocol !== 'https:' || u.hostname !== 'cdn.statcdn.com') return false;
       // A day of slack covers clock skew; further ahead is a mangled date that
       // would sort first in the index for good, as wrong as an old one.
-      const newest = Date.parse(c.date);
-      const age = Date.now() - newest;
+      const age = Date.now() - Date.parse(c.date);
       if (!Number.isFinite(age) || age <= -86400 * 1000 || age >= CHART_DATE_MAX_MS) return false;
-      const lag = newest - Date.parse(j.classifiedTo);
-      return Number.isFinite(lag) && lag <= CHART_CLASSIFY_LAG_MAX_MS;
+      return j.partial === true || j.charts.some((x) => Array.isArray(x?.topics) && x.topics.length > 0);
     },
   },
   {

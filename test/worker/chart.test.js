@@ -2,9 +2,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import worker from '../../worker/src/index.js';
 import {
-  CHART_TOPICS, resolveTopic, parseListing, parseChartPage, topicsOf,
+  CHART_TOPICS, resolveTopic, parseListing, parseChartPage, topicsOf, fetchChart,
 } from '../../worker/src/chart.js';
-import { CHART_TOPICS as SITE_TOPICS, CHART_TOPIC_ALIASES } from '../../site/js/widgets/chart-topics.js';
+import { CHECKS } from '../../worker/src/health.js';
+import { CHART_TOPICS as SITE_TOPICS, CHART_TOPIC_ALIASES, CHART_TOPICS_DROPPED } from '../../site/js/widgets/chart-topics.js';
 import LISTING from './fixtures/statista-recent.html?raw';
 import PAGE_36743 from './fixtures/statista-chart-36743.html?raw';
 import PAGE_36738 from './fixtures/statista-chart-36738.html?raw';
@@ -138,6 +139,7 @@ function stubUpstream({
 }
 
 const ids = (body) => body.charts.map((c) => c.id);
+const chartCheck = CHECKS.find((c) => c.name === 'chart');
 
 afterEach(async () => {
   await clearRoute();
@@ -342,6 +344,7 @@ describe('CHART_TOPICS and resolveTopic', () => {
   it('mirrors the site list and its alias exactly', () => {
     expect(SITE_TOPICS).toEqual(CHART_TOPICS);
     for (const [from, to] of Object.entries(CHART_TOPIC_ALIASES)) expect(resolveTopic(from)).toBe(to);
+    for (const slug of CHART_TOPICS_DROPPED) expect(resolveTopic(slug)).toBe(''); // the worker's general list
   });
 
   it('resolves current, legacy and unknown slugs', () => {
@@ -369,8 +372,13 @@ describe('GET /chart', () => {
     expect(ids(body)).not.toContain('36777');
     expect(ids(body)).not.toContain('36763');
     expect(body.chart).toEqual(body.charts[0]); // the legacy singular field
-    expect(body).toMatchObject({ topic: '', fallback: false, classifiedTo: '2026-11-17' });
+    expect(body).toMatchObject({ topic: '', fallback: false });
     expect(body.partial).toBeUndefined();
+    // The general list needs no topics, so the request reads one wave of chart
+    // pages (the six newest) and leaves the rest for a request that wants them.
+    expect(up.chartPages()).toBe(6);
+    expect(body.charts.slice(0, 6).every((c) => c.topics.length > 0)).toBe(true);
+    expect(body.charts.slice(6).every((c) => c.topics.length === 0)).toBe(true);
     expect(body.charts[0]).toEqual({
       id: '35531',
       title: 'Where Americans Expect the Best Deals This Holiday Season',
@@ -387,7 +395,7 @@ describe('GET /chart', () => {
 
   it('keeps the first listing of a chart and charts only page 2 carries', async () => {
     stubUpstream();
-    await call('/chart');
+    await call('/chart?topic=media');
     const index = await readIndex();
     expect(index.charts.filter((c) => c.id === '36738')).toHaveLength(1);
     expect(index.charts.find((c) => c.id === '36738').title).toBe('Horror Slays at the Box Office');
@@ -441,44 +449,98 @@ describe('GET /chart', () => {
     expect(up.calls).toHaveLength(0);
   });
 
-  it('a fallback is partial only while charts are still waiting for a first try', async () => {
-    // Every chart page but the horror one fails. Each failed chart has had its
-    // try and now waits out a retry delay, so re-polling in two minutes would
-    // change nothing: the fallback is the answer and caches like one.
-    stubUpstream({ chart: (id) => (id === '36738' ? html(PAGE_36738) : html('busy', 503)) });
+  it('a fallback is provisional while any chart is unclassified, and honest once none is', async () => {
+    // Only the newest chart's page answers; the rest fail and wait out a retry.
+    stubUpstream({ chart: (id) => (id === '35531' ? html(HEADS[id]) : html('busy', 503)) });
+    const retail = await (await call('/chart?topic=retail')).json();
+    expect(ids(retail)).toEqual(['35531']);
+    expect(retail.partial).toBeUndefined(); // a real hit, not a fallback
+    expect(await caches.default.match(cacheKey('stale', 'chart:retail'))).toBeTruthy();
+    // Media's charts are among the failed ones. The fallback must not sit on
+    // the topic for an hour, nor become its backup: cached() keeps a partial
+    // answer 120s and never as last-good.
+    const media = await (await call('/chart?topic=media')).json();
+    expect(media).toMatchObject({ fallback: true, partial: true });
+    expect(ids(media)[0]).toBe('35531');
+    expect(await caches.default.match(cacheKey('stale', 'chart:media'))).toBeUndefined();
     const general = await (await call('/chart')).json();
-    expect(general.partial).toBeUndefined(); // not a topic answer
-    expect(general.classifiedTo).toBe('2026-10-28'); // the one chart that classified
-    const ent = await (await call('/chart?topic=entertainment')).json();
-    expect(ids(ent)).toEqual(['36738']);
-    expect(ent.partial).toBeUndefined(); // a real hit, not a fallback
-    const sports = await (await call('/chart?topic=sports')).json();
-    expect(sports.fallback).toBe(true);
-    expect(sports.partial).toBeUndefined();
-    expect(await caches.default.match(cacheKey('stale', 'chart:sports'))).toBeTruthy();
+    expect(general.partial).toBeUndefined(); // the general list is never a fallback
   });
 
-  it('reports no classifiedTo when no chart page answers', async () => {
+  it('a fallback with every chart classified caches like any answer', async () => {
+    stubUpstream();
+    const energy = await (await call('/chart?topic=energy')).json();
+    expect(energy.fallback).toBe(true);
+    expect(energy.partial).toBeUndefined();
+    expect(await caches.default.match(cacheKey('stale', 'chart:energy'))).toBeTruthy();
+  });
+
+  it('a chart-page outage never replaces a topic\'s good backup with the fallback', async () => {
+    stubUpstream();
+    expect(ids(await (await call('/chart?topic=technology')).json())).toEqual(['36744', '36743']);
+    // The colo loses its index (eviction) and Statista starts refusing chart
+    // pages; the route's fresh entry runs out.
+    await caches.default.delete(indexKey());
+    await caches.default.delete(cacheKey('fresh', 'chart:technology'));
     stubUpstream({ chart: () => html('refused', 403) });
-    const body = await (await call('/chart')).json();
-    expect(body.charts).toHaveLength(10); // the general list needs no chart page
-    expect(body.classifiedTo).toBeNull();
+    const during = await (await call('/chart?topic=technology')).json();
+    expect(during).toMatchObject({ fallback: true, partial: true });
+    const backup = await (await caches.default.match(cacheKey('stale', 'chart:technology'))).json();
+    expect(ids(backup)).toEqual(['36744', '36743']);
+  });
+
+  it('stops a pass when nothing answers, and parks the catch-up until the next refresh', async () => {
+    const day = (i) => new Date(Date.UTC(2026, 10, 17) - i * 86400 * 1000).toISOString().slice(0, 10);
+    const results = Array.from({ length: 60 }, (_, i) => item(40001 + i, day(i)));
+    const up = stubUpstream({
+      page1: () => html(listingHtml(results)),
+      page2: () => html('gone', 404),
+      chart: () => html('refused', 403),
+    });
+    const tried = async () => (await readIndex()).charts.filter((c) => c.tries === 1).length;
+    const first = await (await call('/chart?topic=media')).json();
+    expect(first).toMatchObject({ fallback: true, partial: true });
+    expect(first.charts).toHaveLength(10); // the general list needs no chart page
+    // Six failures and no success is Statista, not a bad page: the pass stops
+    // there, give or take the pages already in flight, far short of its 32.
+    const n = up.chartPages();
+    expect(n).toBeGreaterThanOrEqual(6);
+    expect(n).toBeLessThanOrEqual(11);
+    expect((await readIndex()).stalled).toBe(true);
+    expect(await tried()).toBe(n);
+    // Inside the fresh window a stalled index is left alone: no chart pages on
+    // every poll while Statista refuses them.
+    up.reset();
+    await clearCache('chart:media');
+    expect((await call('/chart?topic=media')).status).toBe(200);
+    expect(up.calls).toHaveLength(0);
+    // The next listing refresh tries again, with charts not yet tried (the ones
+    // that failed are inside their retry delay), and stalls again.
+    await ageIndex();
+    await clearRoute();
+    up.reset();
+    expect((await call('/chart?topic=media')).status).toBe(200);
+    expect(up.listings()).toBe(2);
+    expect(up.chartPages()).toBeGreaterThanOrEqual(6);
+    expect(up.chartPages()).toBeLessThanOrEqual(11);
+    expect(await tried()).toBe(n + up.chartPages());
+    expect((await readIndex()).stalled).toBe(true);
   });
 
   it('catches up inside the fresh window: a cold topic converges without a listing fetch', async () => {
-    // 60 charts; the 48 newest are sports, the 12 oldest travel. The first
-    // refresh classifies its cap of 48, so travel falls back, flagged partial;
+    // 60 charts; the 32 newest are sports, the 28 oldest travel. The first
+    // refresh classifies its cap of 32, so travel falls back, flagged partial;
     // the next miss classifies the rest and finds travel's own charts.
     const day = (i) => new Date(Date.UTC(2026, 10, 17) - i * 86400 * 1000).toISOString().slice(0, 10);
     const results = Array.from({ length: 60 }, (_, i) => item(40001 + i, day(i)));
-    const heads = Object.fromEntries(results.map((r, i) => [r.contentId, head([i < 48 ? 409 : 420])]));
+    const heads = Object.fromEntries(results.map((r, i) => [r.contentId, head([i < 32 ? 409 : 420])]));
     const up = stubUpstream({
       page1: () => html(listingHtml(results)),
       page2: () => html('gone', 404),
       chart: (id) => html(heads[id]),
     });
     const first = await (await call('/chart?topic=travel')).json();
-    expect(up.chartPages()).toBe(48); // the per-refresh cap
+    expect(up.chartPages()).toBe(32); // the per-pass cap
     expect(first).toMatchObject({ fallback: true, partial: true });
     // cached() keeps a partial answer briefly and never as the 24h backup.
     expect(await caches.default.match(cacheKey('stale', 'chart:travel'))).toBeUndefined();
@@ -486,7 +548,7 @@ describe('GET /chart', () => {
     await clearCache('chart:travel'); // the 120s partial entry runs out
     const second = await (await call('/chart?topic=travel')).json();
     expect(up.listings()).toBe(0);
-    expect(up.chartPages()).toBe(12);
+    expect(up.chartPages()).toBe(28);
     expect(second.fallback).toBe(false);
     expect(second.partial).toBeUndefined();
     expect(second.charts).toHaveLength(10);
@@ -527,9 +589,9 @@ describe('GET /chart', () => {
     expect(up.chartPages()).toBe(0);
   });
 
-  it('makes no listing fetch inside the index\'s fresh window', async () => {
+  it('makes no fetch at all inside the fresh window once every chart has had its turn', async () => {
     const up = stubUpstream();
-    await call('/chart');
+    await call('/chart?topic=media');
     up.reset();
     await clearCache('chart'); // so the route really runs again
     const res = await call('/chart');
@@ -539,7 +601,7 @@ describe('GET /chart', () => {
 
   it('reuses classifications across refreshes', async () => {
     const up = stubUpstream();
-    await call('/chart');
+    await call('/chart?topic=media');
     expect(up.chartPages()).toBe(12); // 11 on page 1 (sponsored skipped), 1 on page 2
     await ageIndex();
     await clearRoute();
@@ -594,8 +656,31 @@ describe('GET /chart', () => {
     expect(up.listings()).toBe(2);
     expect(up.chartPages()).toBe(0);
     expect(await readIndex()).toBeNull();
-    expect(cold).toMatchObject({ fallback: true, partial: true, classifiedTo: null });
+    expect(cold).toMatchObject({ fallback: true, partial: true });
     expect(ids(cold)[0]).toBe('35531');
+    // The general list built this way carries no topics, so it is provisional
+    // too: two minutes in the cache, never the backup, and the health check
+    // does not read it as "the chart pages stopped answering".
+    const general = await (await call('/chart')).json();
+    expect(general.partial).toBe(true);
+    expect(general.charts.every((c) => c.topics.length === 0)).toBe(true);
+    expect(await caches.default.match(cacheKey('stale', 'chart'))).toBeUndefined();
+    expect(chartCheck.ok(general)).toBe(true);
+  });
+
+  it('a request that defers to a held refresh still uses what the old index knows', async () => {
+    const up = stubUpstream();
+    await call('/chart?topic=media');
+    await ageIndex();
+    await clearRoute();
+    await holdRefresh();
+    up.reset();
+    const media = await (await call('/chart?topic=media')).json();
+    expect(up.listings()).toBe(2); // an aged index still owes the current listing
+    expect(up.chartPages()).toBe(0);
+    expect(ids(media)).toEqual(['25829', '31146', '36738']); // classifications carried over
+    expect(media.partial).toBe(true);
+    expect((await readIndex()).builtAt).toBe(0); // and nothing stored: the holder will
   });
 
   it('a held refresh also parks the catch-up pass, and a finished one lets go', async () => {
@@ -606,18 +691,155 @@ describe('GET /chart', () => {
       page2: () => html('gone', 404),
       chart: () => html(head([409])),
     });
-    expect((await call('/chart')).status).toBe(200);
-    expect(up.chartPages()).toBe(48);
+    expect((await call('/chart?topic=sports')).status).toBe(200);
+    expect(up.chartPages()).toBe(32);
     expect(await caches.default.match(busyKey())).toBeUndefined(); // released when the refresh ended
     await holdRefresh();
-    await clearCache('chart');
+    await clearCache('chart:sports');
     up.reset();
-    expect((await call('/chart')).status).toBe(200);
+    expect((await call('/chart?topic=sports')).status).toBe(200);
     expect(up.calls).toHaveLength(0); // a fresh index answers as it stands
     await caches.default.delete(busyKey());
-    await clearCache('chart');
+    await clearCache('chart:sports');
+    expect((await call('/chart?topic=sports')).status).toBe(200);
+    expect(up.chartPages()).toBe(28); // the catch-up pass runs once nobody holds it
+  });
+
+  it('a refresh that loses its claim midway neither stores its index nor releases the other\'s claim', async () => {
+    // Two requests claimed a moment apart and this one's check passed before
+    // the other's token landed. Played here by the claim changing hands while
+    // the listing is being read.
+    const up = stubUpstream({
+      page1: async () => {
+        await caches.default.put(busyKey(), new Response('someone-else', { headers: { 'Cache-Control': 'max-age=30' } }));
+        return html(LISTING);
+      },
+    });
+    const res = await call('/chart?topic=media');
+    expect(res.status).toBe(200);
+    expect(ids(await res.json())).toEqual(['25829', '31146', '36738']); // it still answers from its own work
+    expect(up.chartPages()).toBe(12);
+    expect(await readIndex()).toBeNull(); // the index is the other request's to store
+    expect(await (await caches.default.match(busyKey())).text()).toBe('someone-else');
+  });
+
+  it('keeps a chart that scrolled off the listing, drops one that turned sponsored, and caps the index', async () => {
+    // 30001 (sports) is on page 2 only. Page 2 then fails: the chart survives
+    // on the index alone, which is how a quiet topic keeps something to show.
+    let up = stubUpstream();
+    expect(ids(await (await call('/chart?topic=sports')).json())).toEqual(['30001']);
+    await ageIndex();
+    await clearRoute();
+    up = stubUpstream({ page2: () => html('down', 500) });
+    expect(ids(await (await call('/chart?topic=sports')).json())).toEqual(['30001']);
+    expect(up.chartPages()).toBe(0);
+    // The same chart comes back on the listing as a sponsored post: gone.
+    await ageIndex();
+    await clearRoute();
+    stubUpstream({ page2: () => html(listingHtml([item(30001, '2026-11-18', { subtitle: 'Sponsored post by Acme' })])) });
+    const after = await (await call('/chart?topic=sports')).json();
+    expect(after.fallback).toBe(true);
+    expect((await readIndex()).charts.some((c) => c.id === '30001')).toBe(false);
+    // And the index holds the newest 300, however much the listing offers.
+    await caches.default.delete(indexKey());
+    await clearRoute();
+    const day = (i) => new Date(Date.UTC(2026, 10, 17) - i * 86400 * 1000).toISOString().slice(0, 10);
+    const many = (from, n) => Array.from({ length: n }, (_, i) => item(50000 + from + i, day(from + i)));
+    stubUpstream({
+      page1: () => html(listingHtml(many(0, 200))),
+      page2: () => html(listingHtml(many(200, 150))),
+      chart: () => html(head([409])),
+    });
     expect((await call('/chart')).status).toBe(200);
-    expect(up.chartPages()).toBe(12); // the catch-up pass runs once nobody holds it
+    const capped = (await readIndex()).charts;
+    expect(capped).toHaveLength(300);
+    expect(capped[0].id).toBe('50000');
+    expect(capped.at(-1).id).toBe('50299');
+  });
+
+  describe('the time budget', () => {
+    // Chart pages that answer after `ms`, or never, and give way to the abort
+    // signal like a real fetch. fetchChart is called directly so the budget can
+    // be a second and a half instead of nine.
+    const slowPages = (ms) => {
+      const day = (i) => new Date(Date.UTC(2026, 10, 17) - i * 86400 * 1000).toISOString().slice(0, 10);
+      const results = Array.from({ length: 60 }, (_, i) => item(60001 + i, day(i)));
+      const seen = { pages: 0, aborted: 0 };
+      vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url === P1) return html(listingHtml(results));
+        if (url === P2) return html('gone', 404);
+        seen.pages += 1;
+        return new Promise((resolve, reject) => {
+          const timer = ms == null ? null : setTimeout(() => resolve(html(head([409]))), ms);
+          init.signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            seen.aborted += 1;
+            reject(init.signal.reason);
+          });
+        });
+      }));
+      return seen;
+    };
+
+    it('starts no chart page it has no time for, and answers inside the budget', async () => {
+      const seen = slowPages(400);
+      const t0 = Date.now();
+      const out = await fetchChart('sports', { origin: 'https://api.test', budgetMs: 1500 });
+      const took = Date.now() - t0;
+      // Waves at 0, 0.4 and 0.8s fit; at 1.2s less than half a second is left.
+      expect(seen.pages).toBe(18);
+      expect(took).toBeLessThan(1500);
+      expect(out.charts).toHaveLength(10);
+      expect(out.fallback).toBe(false);
+      const index = await readIndex();
+      expect(index.charts.filter((c) => c.cls)).toHaveLength(18);
+      expect(index.charts.filter((c) => !c.cls && !c.tries)).toHaveLength(42); // untouched, not failed
+    });
+
+    it('cuts a hanging chart page off at the deadline, not at its own timeout', async () => {
+      const seen = slowPages(null);
+      const t0 = Date.now();
+      const out = await fetchChart('sports', { origin: 'https://api.test', budgetMs: 1500 });
+      const took = Date.now() - t0;
+      expect(seen.pages).toBe(6); // one wave, then the pass stalls
+      expect(seen.aborted).toBe(6);
+      expect(took).toBeGreaterThanOrEqual(1400);
+      expect(took).toBeLessThan(2500); // a page's own timeout is 3.5s
+      expect(out).toMatchObject({ fallback: true, partial: true });
+      expect((await readIndex()).stalled).toBe(true);
+    });
+  });
+
+  describe('what the health check makes of real answers', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const results = Array.from({ length: 12 }, (_, i) => item(70001 + i, today));
+    const live = (chart) => stubUpstream({ page1: () => html(listingHtml(results)), page2: () => html('gone', 404), chart });
+
+    it('passes the general list as the route serves it', async () => {
+      live(() => html(head([409])));
+      expect(chartCheck.ok(await (await call('/chart')).json())).toBe(true);
+    });
+
+    it('fails when chart pages are refused', async () => {
+      live(() => html('refused', 403));
+      expect(chartCheck.ok(await (await call('/chart')).json())).toBe(false);
+    });
+
+    it('fails when chart pages answer but say nothing: an empty industry list on every one', async () => {
+      // A consent or bot variant of the page, or ad targeting switched off.
+      // Every chart "classifies", no chart earns a topic.
+      const up = live(() => html(head([])));
+      const body = await (await call('/chart')).json();
+      expect(up.chartPages()).toBe(6);
+      expect(body.partial).toBeUndefined();
+      expect(chartCheck.ok(body)).toBe(false);
+    });
+
+    it('fails when the industry ids no longer mean anything to the topic rules', async () => {
+      live(() => html(head([9001, 9002])));
+      expect(chartCheck.ok(await (await call('/chart')).json())).toBe(false);
+    });
   });
 
   it('stops reading a chart page at the targeting call, or at 64KB without one', async () => {

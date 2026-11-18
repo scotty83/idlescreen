@@ -3803,7 +3803,8 @@ describe('the health alert state lives in KV, because the Cache API is colo-loca
       title: 'Where Americans Expect the Best Deals This Holiday Season',
       url: 'https://cdn.statcdn.com/Infographic/images/normal/35531.jpeg',
       date: new Date().toISOString().slice(0, 10), // the check reads the newest chart's own clock too
-    }], classifiedTo: new Date().toISOString().slice(0, 10) }],
+      topics: ['consumer goods', 'retail'], // and wants a topic on at least one chart served
+    }] }],
   ];
   const feedKey = (key) => new Request(`${SELF_ORIGIN}/__cache/fresh/${encodeURIComponent(key)}`);
   const seedGreenFeeds = () => Promise.all(GREEN_FEEDS.map(([key, body]) => caches.default.put(

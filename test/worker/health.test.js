@@ -60,7 +60,6 @@ const OK_BODIES = {
     }],
     topic: '',
     fallback: false,
-    classifiedTo: new Date().toISOString().slice(0, 10),
   },
 };
 OK_BODIES['/chart'].chart = OK_BODIES['/chart'].charts[0];
@@ -208,11 +207,7 @@ describe('health CHECKS validators', () => {
   });
   it('chart: a numbered, titled, current chart image on Statista\'s CDN', () => {
     const live = OK_BODIES['/chart'];
-    // classifiedTo follows the chart's own date unless a case sets it apart.
-    const first = (over, classifiedTo) => {
-      const c = { ...live.charts[0], ...over };
-      return { charts: [c], classifiedTo: classifiedTo === undefined ? c.date : classifiedTo };
-    };
+    const first = (over) => ({ charts: [{ ...live.charts[0], ...over }] });
     const daysAgo = (n) => new Date(Date.now() - n * 86400 * 1000).toISOString().slice(0, 10);
     expect(byName.chart(live)).toBe(true);
     expect(byName.chart({ charts: [] })).toBe(false); // nothing to show
@@ -231,13 +226,13 @@ describe('health CHECKS validators', () => {
     expect(byName.chart(first({ date: daysAgo(15) }))).toBe(false);
     expect(byName.chart(first({ date: daysAgo(-2) }))).toBe(false); // future: a mangled date
     expect(byName.chart(first({ date: '' }))).toBe(false);
-    // The classification clock: the newest chart with a topic may trail the
-    // newest chart by a weekend, not by days of charts nobody could classify.
-    expect(byName.chart(first({ date: daysAgo(0) }, daysAgo(2)))).toBe(true);
-    expect(byName.chart(first({ date: daysAgo(0) }, daysAgo(4)))).toBe(false);
-    expect(byName.chart(first({}, null))).toBe(false); // no chart page has ever answered
-    expect(byName.chart({ charts: live.charts })).toBe(false); // an answer without the field
-    expect(byName.chart(first({}, 'soon'))).toBe(false);
+    // The topic clock: of the charts served, at least one has earned a topic.
+    const bare = { ...live.charts[0], topics: [] };
+    expect(byName.chart({ charts: [bare] })).toBe(false); // chart pages refused, or saying nothing
+    expect(byName.chart({ charts: [{ ...bare, topics: undefined }] })).toBe(false); // an answer from before the field
+    expect(byName.chart({ charts: [bare, bare, live.charts[0]] })).toBe(true); // any one of them will do
+    expect(byName.chart({ charts: [bare], partial: true })).toBe(true); // a provisional answer is excused
+    expect(byName.chart({ charts: [{ ...bare, date: daysAgo(15) }], partial: true })).toBe(false); // but not from the other clocks
   });
 });
 
@@ -618,14 +613,15 @@ describe('chart (the Statista card nothing watched through the 2026-11 redesign)
 
   it('FAILS on a frozen listing: fresh stamp, stale:false, but the newest chart three weeks old', async () => {
     const old = new Date(Date.now() - 21 * 86400 * 1000).toISOString().slice(0, 10);
-    const report = await run({ '/chart': { body: body({ charts: [{ ...OK_BODIES['/chart'].charts[0], date: old }], classifiedTo: old }) } });
+    const report = await run({ '/chart': { body: body({ charts: [{ ...OK_BODIES['/chart'].charts[0], date: old }] }) } });
     expect(chart(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
   });
 
-  it('FAILS when the chart pages stop answering: a current general list, but nothing classified for days', async () => {
-    const lagging = new Date(Date.now() - 6 * 86400 * 1000).toISOString().slice(0, 10);
-    expect(chart(await run({ '/chart': { body: body({ classifiedTo: lagging }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
-    expect(chart(await run({ '/chart': { body: body({ classifiedTo: null }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+  it('FAILS when the chart pages stop answering: a current general list, but no chart in any topic', async () => {
+    const untopiced = [{ ...OK_BODIES['/chart'].charts[0], topics: [] }];
+    expect(chart(await run({ '/chart': { body: body({ charts: untopiced }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    // The two-minute answer of a request that deferred to another's refresh is not that failure.
+    expect(chart(await run({ '/chart': { body: body({ charts: untopiced, partial: true }) } }))).toMatchObject({ ok: true });
   });
 });
 

@@ -27,6 +27,10 @@ export const CHART_TOPICS = [
 export const CHART_TOPIC_SLUGS = new Set(CHART_TOPICS.map(([, slug]) => slug));
 
 // Saved slugs that now mean another topic: Energy and Environment merged under
-// energy. The dropped Business and Science topics have no alias, so a saved
-// pick of either simply falls away (the worker reads them as the general list).
+// energy.
 export const CHART_TOPIC_ALIASES = { environment: 'energy' };
+
+// Topics dropped in the November 2026 change. A saved pick of either falls
+// away, and a board that had picked nothing else is left with no topic, the
+// newest charts overall (which is how the worker reads these slugs too).
+export const CHART_TOPICS_DROPPED = new Set(['business', 'science']);

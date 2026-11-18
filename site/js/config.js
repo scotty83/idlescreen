@@ -10,7 +10,7 @@
 import { CATALOG_IDS, CATALOG_GROUPS } from './catalog.js';
 import { DEFAULT_LAYOUT, normalizeLayout, migrateWidgetsToLayout, contentMaxH } from './layout.js';
 import { TFL_TUBE_IDS, TFL_LINE_IDS } from './tfl-lines.js';
-import { CHART_TOPICS, CHART_TOPIC_SLUGS, CHART_TOPIC_ALIASES } from './widgets/chart-topics.js';
+import { CHART_TOPICS, CHART_TOPIC_SLUGS, CHART_TOPIC_ALIASES, CHART_TOPICS_DROPPED } from './widgets/chart-topics.js';
 import { DEFAULT_SCHEDULE } from './modes.js';
 import { OCEAN_WIDGETS, hasOcean } from './surf-gate.js';
 
@@ -385,14 +385,17 @@ export function normalizeConfig(raw) {
       // ['environment', 'energy'] is one pick. The dropped business and
       // science slugs have no alias and fall away like any unknown slug; a
       // list of only those becomes [], the general listing, which is what the
-      // worker serves for them too.
+      // worker serves for them too; the old single-topic field reads the same
+      // way. Only a string is looked up as an alias: a saved config can hold
+      // anything, and a property lookup would call a hostile toString.
       topics: (() => {
-        const alias = (s) => (Object.hasOwn(CHART_TOPIC_ALIASES, s) ? CHART_TOPIC_ALIASES[s] : s);
+        const alias = (s) => (typeof s === 'string' && Object.hasOwn(CHART_TOPIC_ALIASES, s) ? CHART_TOPIC_ALIASES[s] : s);
         if (Array.isArray(raw.chart?.topics)) {
           return [...new Set(raw.chart.topics.map(alias).filter((s) => CHART_TOPIC_SLUGS.has(s)))].slice(0, CHART_TOPIC_SLUGS.size);
         }
         const legacy = alias(raw.chart?.topic);
         if (raw.chart?.topics == null && CHART_TOPIC_SLUGS.has(legacy)) return [legacy];
+        if (raw.chart?.topics == null && CHART_TOPICS_DROPPED.has(legacy)) return [];
         return [...DEFAULT_CONFIG.chart.topics];
       })(),
     },
