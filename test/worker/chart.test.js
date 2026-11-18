@@ -759,6 +759,24 @@ describe('GET /chart', () => {
     expect((await readIndex()).charts.filter((c) => c.cls)).toHaveLength(12);
   });
 
+  it('a dropped claim over an existing index still writes: the index is as the pass found it', async () => {
+    stubUpstream();
+    await call('/chart?topic=media');
+    const before = (await readIndex()).rev;
+    await ageIndex();
+    await clearRoute();
+    stubUpstream({
+      page1: async () => {
+        await caches.default.delete(busyKey());
+        return html(LISTING);
+      },
+    });
+    expect((await call('/chart?topic=media')).status).toBe(200);
+    const after = await readIndex();
+    expect(after.rev).not.toBe(before); // stored, so a colo whose claim reads miss still moves on
+    expect(after.builtAt).toBeGreaterThan(0);
+  });
+
   it('a pass that was overtaken does not write over the index the other one stored', async () => {
     // Two requests claimed a moment apart. The other one finished first: it
     // stored a full index and released the claim. This one, slower and with
