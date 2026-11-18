@@ -695,8 +695,10 @@ describe('GET /chart', () => {
     await holdRefresh();
     await clearCache('chart:sports');
     up.reset();
-    expect((await call('/chart?topic=sports')).status).toBe(200);
+    const deferred = await (await call('/chart?topic=sports')).json();
     expect(up.calls).toHaveLength(0); // a fresh index answers as it stands
+    expect(deferred.fallback).toBe(false);
+    expect(deferred.partial).toBe(true); // but provisionally: the holder is about to store better
     await caches.default.delete(busyKey());
     await clearCache('chart:sports');
     expect((await call('/chart?topic=sports')).status).toBe(200);
@@ -755,6 +757,36 @@ describe('GET /chart', () => {
     });
     expect((await call('/chart?topic=media')).status).toBe(200);
     expect((await readIndex()).charts.filter((c) => c.cls)).toHaveLength(12);
+  });
+
+  it('a pass that was overtaken does not write over the index the other one stored', async () => {
+    // Two requests claimed a moment apart. The other one finished first: it
+    // stored a full index and released the claim. This one, slower and with
+    // every chart page refused, finds no claim at all when it comes to store,
+    // which must not read as "still mine" this time.
+    const theirs = { builtAt: Date.now(), rev: 'theirs', charts: [{ id: '1', path: '/chart/1/x/', title: 'Theirs', desc: '', date: '2026-11-18', cls: { b: ['409'], tags: [] }, tries: 0 }] };
+    stubUpstream({
+      page1: async () => {
+        await writeIndex(theirs);
+        await caches.default.delete(busyKey());
+        return html(LISTING);
+      },
+      chart: () => html('refused', 403),
+    });
+    const res = await call('/chart?topic=media');
+    expect(res.status).toBe(200); // it still answers from its own work
+    expect(await readIndex()).toEqual(theirs);
+  });
+
+  it('gives every stored index a new revision', async () => {
+    stubUpstream();
+    await call('/chart?topic=media');
+    const first = (await readIndex()).rev;
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    await ageIndex();
+    await clearRoute();
+    await call('/chart?topic=media');
+    expect((await readIndex()).rev).not.toBe(first);
   });
 
   it('keeps a chart that scrolled off the listing, drops one that turned sponsored, and caps the index', async () => {

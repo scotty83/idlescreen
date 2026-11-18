@@ -279,9 +279,11 @@ export const CHECKS = [
     // by nature (elections, say); ten in a row would be a first. Artificial
     // intelligence alone does not count: it is the one topic a chart can earn
     // from its tags, so it would survive a renumbering of the industries that
-    // silenced the other fifteen. The one answer excused is a partial one: on this key that only ever means the
-    // request found another already reading the chart pages and answered from
-    // the listing alone (see loadIndex in chart.js); it lives two minutes.
+    // silenced the other fifteen. The one answer excused is a partial one: on
+    // this key that only ever means the request found another already reading
+    // the chart pages and answered without reading any itself, from the
+    // listing or from the index as it stood (see loadIndex in chart.js); it
+    // lives two minutes.
     name: 'chart',
     path: '/chart',
     maxStaleSec: CHART_TTL_S + STALE_MAX,

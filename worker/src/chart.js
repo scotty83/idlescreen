@@ -457,10 +457,18 @@ async function release(origin, token) {
   if ((await holder(origin)) === token) await caches.default.delete(busyKey(origin)).catch(() => {});
 }
 
-async function writeIndex(origin, index, token) {
-  if (lostTo(await holder(origin), token)) return; // the claim passed to another request: its index stands
+// `seenRev` is the revision of the index this pass started from. Every stored
+// index gets a new one, which settles the one case a missing claim cannot: the
+// cache may have dropped the claim (then the index is as this pass found it,
+// and the write goes ahead), or another request took the claim over, stored
+// its index and released (then the index has moved on, and this pass, which
+// started earlier and may have fared worse, must not replace it).
+async function writeIndex(origin, index, token, seenRev) {
+  const held = await holder(origin);
+  if (lostTo(held, token)) return; // the claim passed to another request: its index stands
+  if (held === null && ((await readIndex(origin))?.rev ?? null) !== seenRev) return;
   try {
-    await caches.default.put(indexKey(origin), new Response(JSON.stringify(index), {
+    await caches.default.put(indexKey(origin), new Response(JSON.stringify({ ...index, rev: crypto.randomUUID() }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${INDEX_KEEP_S}` },
     }));
   } catch (err) {
@@ -604,7 +612,7 @@ async function loadIndex(origin, max, budgetMs) {
       : { builtAt: Date.now(), ...(await readListing(old, deadline)) };
     const stalled = await classify(base.charts, { want: fresh ? untried : due, max, deadline });
     const index = { ...base, ...(stalled ? { stalled: true } : {}) };
-    await writeIndex(origin, index, token);
+    await writeIndex(origin, index, token, old?.rev ?? null);
     return index;
   } finally {
     await release(origin, token);
