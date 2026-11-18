@@ -374,11 +374,11 @@ describe('GET /chart', () => {
     expect(body.chart).toEqual(body.charts[0]); // the legacy singular field
     expect(body).toMatchObject({ topic: '', fallback: false });
     expect(body.partial).toBeUndefined();
-    // The general list needs no topics, so the request reads one wave of chart
-    // pages (the six newest) and leaves the rest for a request that wants them.
-    expect(up.chartPages()).toBe(6);
-    expect(body.charts.slice(0, 6).every((c) => c.topics.length > 0)).toBe(true);
-    expect(body.charts.slice(6).every((c) => c.topics.length === 0)).toBe(true);
+    // The general list needs no topics, so the request reads the pages of the
+    // ten charts it serves and leaves the rest for a request that wants them.
+    expect(up.chartPages()).toBe(10);
+    expect(body.charts.every((c) => c.topics.length > 0)).toBe(true);
+    expect((await readIndex()).charts.filter((c) => c.cls)).toHaveLength(10);
     expect(body.charts[0]).toEqual({
       id: '35531',
       title: 'Where Americans Expect the Best Deals This Holiday Season',
@@ -502,10 +502,9 @@ describe('GET /chart', () => {
     expect(first).toMatchObject({ fallback: true, partial: true });
     expect(first.charts).toHaveLength(10); // the general list needs no chart page
     // Six failures and no success is Statista, not a bad page: the pass stops
-    // there, give or take the pages already in flight, far short of its 32.
+    // after its first wave, far short of its 32.
     const n = up.chartPages();
-    expect(n).toBeGreaterThanOrEqual(6);
-    expect(n).toBeLessThanOrEqual(11);
+    expect(n).toBe(6);
     expect((await readIndex()).stalled).toBe(true);
     expect(await tried()).toBe(n);
     // Inside the fresh window a stalled index is left alone: no chart pages on
@@ -521,9 +520,8 @@ describe('GET /chart', () => {
     up.reset();
     expect((await call('/chart?topic=media')).status).toBe(200);
     expect(up.listings()).toBe(2);
-    expect(up.chartPages()).toBeGreaterThanOrEqual(6);
-    expect(up.chartPages()).toBeLessThanOrEqual(11);
-    expect(await tried()).toBe(n + up.chartPages());
+    expect(up.chartPages()).toBe(6);
+    expect(await tried()).toBe(12);
     expect((await readIndex()).stalled).toBe(true);
   });
 
@@ -723,6 +721,42 @@ describe('GET /chart', () => {
     expect(await (await caches.default.match(busyKey())).text()).toBe('someone-else');
   });
 
+  it('a topic that comes up empty without page 2 of the listing is not called empty', async () => {
+    // Sports' only chart is on page 2. The colo has lost its index, page 2 is
+    // down, and every page-1 chart classifies: nothing is unclassified, yet
+    // the fallback must stay provisional and leave the topic's backup alone.
+    stubUpstream();
+    expect(ids(await (await call('/chart?topic=sports')).json())).toEqual(['30001']);
+    await caches.default.delete(indexKey());
+    await caches.default.delete(cacheKey('fresh', 'chart:sports'));
+    stubUpstream({ page2: () => html('down', 500) });
+    const during = await (await call('/chart?topic=sports')).json();
+    expect(during).toMatchObject({ fallback: true, partial: true });
+    expect((await readIndex()).short).toBe(true);
+    expect((await readIndex()).charts.some((c) => c.cls == null)).toBe(false);
+    expect(ids(await (await caches.default.match(cacheKey('stale', 'chart:sports'))).json())).toEqual(['30001']);
+    // A topic with real hits is unaffected, and page 2 coming back clears it.
+    expect((await (await call('/chart?topic=media')).json()).partial).toBeUndefined();
+    await ageIndex();
+    await clearRoute();
+    stubUpstream();
+    expect(ids(await (await call('/chart?topic=sports')).json())).toEqual(['30001']);
+    expect((await readIndex()).short).toBeUndefined();
+  });
+
+  it('a claim the cache does not read back still counts as held', async () => {
+    // The Cache API does not promise read-after-write. Played here by the claim
+    // vanishing while the listing is read: the refresh must still store its index.
+    stubUpstream({
+      page1: async () => {
+        await caches.default.delete(busyKey());
+        return html(LISTING);
+      },
+    });
+    expect((await call('/chart?topic=media')).status).toBe(200);
+    expect((await readIndex()).charts.filter((c) => c.cls)).toHaveLength(12);
+  });
+
   it('keeps a chart that scrolled off the listing, drops one that turned sponsored, and caps the index', async () => {
     // 30001 (sports) is on page 2 only. Page 2 then fails: the chart survives
     // on the index alone, which is how a quiet topic keeps something to show.
@@ -802,12 +836,35 @@ describe('GET /chart', () => {
       const t0 = Date.now();
       const out = await fetchChart('sports', { origin: 'https://api.test', budgetMs: 1500 });
       const took = Date.now() - t0;
-      expect(seen.pages).toBe(6); // one wave, then the pass stalls
+      expect(seen.pages).toBe(6); // one wave, and no time for another
       expect(seen.aborted).toBe(6);
       expect(took).toBeGreaterThanOrEqual(1400);
       expect(took).toBeLessThan(2500); // a page's own timeout is 3.5s
       expect(out).toMatchObject({ fallback: true, partial: true });
-      expect((await readIndex()).stalled).toBe(true);
+      // Running out of time says nothing about the pages: none is charged a
+      // try, and the index is not marked stalled, so the next poll takes them.
+      const index = await readIndex();
+      expect(index.stalled).toBeUndefined();
+      expect(index.charts.every((c) => !c.tries)).toBe(true);
+    });
+
+    it('a page that outlasts its own full timeout is a failed page, and six of them stall the pass', async () => {
+      const seen = slowPages(null);
+      const out = await fetchChart('sports', { origin: 'https://api.test', budgetMs: 9000 });
+      expect(seen.pages).toBe(6);
+      expect(out).toMatchObject({ fallback: true, partial: true });
+      const index = await readIndex();
+      expect(index.stalled).toBe(true);
+      expect(index.charts.filter((c) => c.tries === 1)).toHaveLength(6);
+    });
+
+    it('holds the listing to the same deadline', async () => {
+      vi.stubGlobal('fetch', vi.fn((input, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      })));
+      const t0 = Date.now();
+      await expect(fetchChart('', { origin: 'https://api.test', budgetMs: 800 })).rejects.toThrow();
+      expect(Date.now() - t0).toBeLessThan(1800); // the listing's own timeout is 5s
     });
   });
 
@@ -831,7 +888,7 @@ describe('GET /chart', () => {
       // Every chart "classifies", no chart earns a topic.
       const up = live(() => html(head([])));
       const body = await (await call('/chart')).json();
-      expect(up.chartPages()).toBe(6);
+      expect(up.chartPages()).toBe(10);
       expect(body.partial).toBeUndefined();
       expect(chartCheck.ok(body)).toBe(false);
     });
@@ -839,6 +896,13 @@ describe('GET /chart', () => {
     it('fails when the industry ids no longer mean anything to the topic rules', async () => {
       live(() => html(head([9001, 9002])));
       expect(chartCheck.ok(await (await call('/chart')).json())).toBe(false);
+    });
+
+    it('fails when only tags still earn a topic: AI alone is not evidence the industries work', async () => {
+      live(() => html(head([9001, 9002], ['Generative AI'])));
+      const body = await (await call('/chart')).json();
+      expect(body.charts[0].topics).toEqual(['artificial intelligence']);
+      expect(chartCheck.ok(body)).toBe(false);
     });
   });
 

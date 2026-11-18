@@ -276,8 +276,10 @@ export const CHECKS = [
     // so a weekend or a holiday cannot trip it, and counted in topics, not
     // classifications, so a page that still answers but no longer says
     // anything useful is caught too. Around a fifth of charts sit in no topic
-    // by nature (elections, say); ten in a row would be a first. The one
-    // answer excused is a partial one: on this key that only ever means the
+    // by nature (elections, say); ten in a row would be a first. Artificial
+    // intelligence alone does not count: it is the one topic a chart can earn
+    // from its tags, so it would survive a renumbering of the industries that
+    // silenced the other fifteen. The one answer excused is a partial one: on this key that only ever means the
     // request found another already reading the chart pages and answered from
     // the listing alone (see loadIndex in chart.js); it lives two minutes.
     name: 'chart',
@@ -294,7 +296,8 @@ export const CHECKS = [
       // would sort first in the index for good, as wrong as an old one.
       const age = Date.now() - Date.parse(c.date);
       if (!Number.isFinite(age) || age <= -86400 * 1000 || age >= CHART_DATE_MAX_MS) return false;
-      return j.partial === true || j.charts.some((x) => Array.isArray(x?.topics) && x.topics.length > 0);
+      return j.partial === true
+        || j.charts.some((x) => Array.isArray(x?.topics) && x.topics.some((t) => t !== 'artificial intelligence'));
     },
   },
   {
