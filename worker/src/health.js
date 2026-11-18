@@ -21,6 +21,7 @@
 // wrangler.toml to turn the cron off).
 
 import { APOD_TTL_S } from './apod.js';
+import { CHART_TTL_S } from './chart.js';
 
 const STALE_MAX = 3600; // 1h: past this, stale cache means the upstream is really down
 
@@ -32,6 +33,17 @@ const STALE_MAX = 3600; // 1h: past this, stale cache means the upstream is real
 // and well past the one-day-and-change a healthy feed reaches.
 const APOD_DATE_MAX_MS = 4 * 86400 * 1000;
 const APOD_IMAGE_PATH = /\.(?:jpe?g|png|gif|webp)$/i;
+
+// The newest chart's own clock (see the chart check). Statista posts on
+// weekdays, so a healthy newest chart is a day or two old, three over a
+// weekend. Two weeks covers a holiday gap and still catches a listing that
+// froze.
+const CHART_DATE_MAX_MS = 14 * 86400 * 1000;
+// How far the newest CLASSIFIED chart may trail the newest chart. Several
+// charts post each weekday and a failed chart page is retried within the day,
+// so a healthy index trails by nothing; three days of charts with no
+// classification among them means the chart pages stopped answering.
+const CHART_CLASSIFY_LAG_MAX_MS = 3 * 86400 * 1000;
 
 export const CHECKS = [
   {
@@ -240,6 +252,49 @@ export const CHECKS = [
       // good) is as wrong as an old one; a day of slack covers clock skew.
       const age = Date.now() - Date.parse(p.date);
       return Number.isFinite(age) && age > -86400 * 1000 && age < APOD_DATE_MAX_MS;
+    },
+  },
+  {
+    // Statista Chart of the Day. Added when the 2026-11 Statista redesign
+    // retired the /chartoftheday/ pages the route scraped: the route answered
+    // 502 and the card blanked on every board, and nothing paged because
+    // nothing watched it.
+    // Only the general list is probed (no ?topic=): it is the one answer every
+    // topic falls back to, and a topic probe would page for a quiet topic. The
+    // content asserted is what the card needs: a numbered, titled chart whose
+    // image is https on Statista's CDN, cdn.statcdn.com. The image itself is
+    // not fetched, for the reason the apod check gives.
+    //
+    // Two clocks, as for apod. maxStaleSec catches the loud way (the listing
+    // erroring while cached() serves last-good): a healthy answer is up to
+    // CHART_TTL_S (1h) old by design, so the window is that plus the usual
+    // STALE_MAX. The chart's date catches the quiet way: a listing that keeps
+    // answering 200 with the same charts is re-stamped fresh on every refresh,
+    // and only the newest chart's own date shows it froze.
+    //
+    // A third failure hides behind both: topics come from each chart's own
+    // page, a second upstream the general list never needs. If Statista
+    // refuses those pages (or reshapes them), the general list stays perfectly
+    // healthy while every topic drifts onto old charts and then onto the
+    // fallback. classifiedTo, the date of the newest chart the index could
+    // classify, is the one field that shows it.
+    name: 'chart',
+    path: '/chart',
+    maxStaleSec: CHART_TTL_S + STALE_MAX,
+    ok: (j) => {
+      const c = Array.isArray(j.charts) ? j.charts[0] : null;
+      if (!c || typeof c.id !== 'string' || !/^\d+$/.test(c.id)) return false;
+      if (typeof c.title !== 'string' || !c.title) return false;
+      let u;
+      try { u = new URL(c.url); } catch { return false; }
+      if (u.protocol !== 'https:' || u.hostname !== 'cdn.statcdn.com') return false;
+      // A day of slack covers clock skew; further ahead is a mangled date that
+      // would sort first in the index for good, as wrong as an old one.
+      const newest = Date.parse(c.date);
+      const age = Date.now() - newest;
+      if (!Number.isFinite(age) || age <= -86400 * 1000 || age >= CHART_DATE_MAX_MS) return false;
+      const lag = newest - Date.parse(j.classifiedTo);
+      return Number.isFinite(lag) && lag <= CHART_CLASSIFY_LAG_MAX_MS;
     },
   },
   {

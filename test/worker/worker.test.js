@@ -19,7 +19,7 @@ import { parseLegs, siriUrl } from '../../worker/src/bus.js';
 import { njtDateToEpoch } from '../../worker/src/njt.js';
 import { mapMtaAlerts } from '../../worker/src/alerts.js';
 import { resetGraphToken, fetchServiceRows, serviceDigest, SVC_DEADLINE_MS, SERVICES } from '../../worker/src/svcstatus.js';
-import STATISTA from './fixtures/statista-cotd.html?raw';
+import STATISTA from './fixtures/statista-recent.html?raw';
 import yahooFx from '../fixtures/yahoo-gspc.json';
 import { mapYahooChart, quoteFreshS, quoteTrading, nextOpenS, QUOTE_ACTIVE_S, QUOTE_IDLE_MAX_S, QUOTE_UNKNOWN_OPEN_S } from '../../worker/src/markets.js';
 import WORKER_SOURCE from '../../worker/src/index.js?raw';
@@ -3798,6 +3798,12 @@ describe('the health alert state lives in KV, because the Cache API is colo-loca
       title: 'Messier 33: The Triangulum Galaxy',
       date: new Date().toISOString().slice(0, 10), // the check reads the photo's own clock
     } }],
+    ['chart', { charts: [{
+      id: '35531',
+      title: 'Where Americans Expect the Best Deals This Holiday Season',
+      url: 'https://cdn.statcdn.com/Infographic/images/normal/35531.jpeg',
+      date: new Date().toISOString().slice(0, 10), // the check reads the newest chart's own clock too
+    }], classifiedTo: new Date().toISOString().slice(0, 10) }],
   ];
   const feedKey = (key) => new Request(`${SELF_ORIGIN}/__cache/fresh/${encodeURIComponent(key)}`);
   const seedGreenFeeds = () => Promise.all(GREEN_FEEDS.map(([key, body]) => caches.default.put(

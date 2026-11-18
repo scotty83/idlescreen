@@ -3,6 +3,7 @@ import { CHECKS, runHealthChecks, notify, alertPlan, nextFailingState, heartbeat
 import { QUOTE_IDLE_MAX_S } from '../../worker/src/markets.js';
 import { SPORTS_IDLE_MAX_S } from '../../worker/src/sports.js';
 import { APOD_TTL_S } from '../../worker/src/apod.js';
+import { CHART_TTL_S } from '../../worker/src/chart.js';
 
 // Valid response bodies keyed by a unique substring of each check's URL, so a
 // mock fetch can answer every probe with a shape its validator accepts. The
@@ -44,7 +45,25 @@ const OK_BODIES = {
       date: new Date().toISOString().slice(0, 10),
     },
   },
+  // fetchChart's general list, cut to its newest entry and dated today.
+  '/chart': {
+    ...STAMP(),
+    chart: null,
+    charts: [{
+      id: '35531',
+      title: 'Where Americans Expect the Best Deals This Holiday Season',
+      desc: 'This chart shows the share of U.S. respondents who expect the best deals on Black Friday.',
+      date: new Date().toISOString().slice(0, 10),
+      url: 'https://cdn.statcdn.com/Infographic/images/normal/35531.jpeg',
+      link: 'https://www.statista.com/chart/35531/black-friday-product-categories-best-deals-expectations/',
+      topics: ['consumer goods', 'retail'],
+    }],
+    topic: '',
+    fallback: false,
+    classifiedTo: new Date().toISOString().slice(0, 10),
+  },
 };
+OK_BODIES['/chart'].chart = OK_BODIES['/chart'].charts[0];
 const bodyFor = (url) => OK_BODIES[Object.keys(OK_BODIES).find((k) => url.includes(k))];
 
 // The CODES binding the setup-code canary reads. A healthy namespace has
@@ -186,6 +205,39 @@ describe('health CHECKS validators', () => {
     expect(byName.apod(photo({ date: daysAgo(-2) }))).toBe(false); // future: a frozen newest-pick
     expect(byName.apod(photo({ date: '2037-09-30' }))).toBe(false);
     expect(byName.apod(photo({ date: '' }))).toBe(false);
+  });
+  it('chart: a numbered, titled, current chart image on Statista\'s CDN', () => {
+    const live = OK_BODIES['/chart'];
+    // classifiedTo follows the chart's own date unless a case sets it apart.
+    const first = (over, classifiedTo) => {
+      const c = { ...live.charts[0], ...over };
+      return { charts: [c], classifiedTo: classifiedTo === undefined ? c.date : classifiedTo };
+    };
+    const daysAgo = (n) => new Date(Date.now() - n * 86400 * 1000).toISOString().slice(0, 10);
+    expect(byName.chart(live)).toBe(true);
+    expect(byName.chart({ charts: [] })).toBe(false); // nothing to show
+    expect(byName.chart({ chart: live.charts[0] })).toBe(false); // the legacy field alone is not the contract
+    expect(byName.chart({})).toBe(false);
+    expect(byName.chart(first({ id: 35531 }))).toBe(false); // a number, not the string id
+    expect(byName.chart(first({ id: 'infographic-35531' }))).toBe(false);
+    expect(byName.chart(first({ title: '' }))).toBe(false);
+    // Plain http, another host, garbage.
+    expect(byName.chart(first({ url: live.charts[0].url.replace('https:', 'http:') }))).toBe(false);
+    expect(byName.chart(first({ url: 'https://www.statista.com/graphic/1/35531/x.jpg' }))).toBe(false);
+    expect(byName.chart(first({ url: 'not a url' }))).toBe(false);
+    // The chart's own clock: a long weekend passes, a frozen listing does not.
+    expect(byName.chart(first({ date: daysAgo(4) }))).toBe(true);
+    expect(byName.chart(first({ date: daysAgo(13) }))).toBe(true);
+    expect(byName.chart(first({ date: daysAgo(15) }))).toBe(false);
+    expect(byName.chart(first({ date: daysAgo(-2) }))).toBe(false); // future: a mangled date
+    expect(byName.chart(first({ date: '' }))).toBe(false);
+    // The classification clock: the newest chart with a topic may trail the
+    // newest chart by a weekend, not by days of charts nobody could classify.
+    expect(byName.chart(first({ date: daysAgo(0) }, daysAgo(2)))).toBe(true);
+    expect(byName.chart(first({ date: daysAgo(0) }, daysAgo(4)))).toBe(false);
+    expect(byName.chart(first({}, null))).toBe(false); // no chart page has ever answered
+    expect(byName.chart({ charts: live.charts })).toBe(false); // an answer without the field
+    expect(byName.chart(first({}, 'soon'))).toBe(false);
   });
 });
 
@@ -330,12 +382,13 @@ describe('runHealthChecks', () => {
     expect(report.results).toHaveLength(CHECKS.length);
     expect(report.results.every((r) => r.ok)).toBe(true);
   });
-  it('carries all 17 checks, each under a distinct name', () => {
+  it('carries all 18 checks, each under a distinct name', () => {
     // A hard count on purpose: toHaveLength(CHECKS.length) above is circular and
     // would happily pass with a check silently deleted. 13 → 16 on 2026-08-21
-    // (site-unsleep and the two idlescreen aliases), 17 on 2026-09-30 (apod).
-    expect(CHECKS).toHaveLength(17);
-    expect(new Set(CHECKS.map((c) => c.name)).size).toBe(17);
+    // (site-unsleep and the two idlescreen aliases), 17 on 2026-09-30 (apod),
+    // 18 on 2026-11-18 (chart).
+    expect(CHECKS).toHaveLength(18);
+    expect(new Set(CHECKS.map((c) => c.name)).size).toBe(18);
   });
   it('flags a non-200 with its status', async () => {
     const report = await run({ '/markets': { status: 503 } });
@@ -517,6 +570,62 @@ describe('apod (the NASA photo nothing watched through the 2026-09-29 site move)
     const photo = { ...OK_BODIES['/apod'].photo, url: 'https://apod.nasa.gov/apod/image/2607/M24_1088.jpg' };
     const report = await run({ '/apod': { body: body({ photo }) } });
     expect(apod(report).ok).toBe(false);
+  });
+});
+
+describe('chart (the Statista card nothing watched through the 2026-11 redesign)', () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const run = (overrides = {}) => {
+    const m = mockFetch(overrides);
+    return runHealthChecks(okEnv(), m, m);
+  };
+  const chart = (report) => report.results.find((r) => r.name === 'chart');
+  const body = (over) => JSON.stringify({ ...OK_BODIES['/chart'], ...over });
+
+  it('probes the general list in-process (path, not url, no topic)', () => {
+    const check = CHECKS.find((c) => c.name === 'chart');
+    expect(check.path).toBe('/chart');
+    expect(check.url).toBeUndefined();
+    // Right after apod, where the image-of-the-day checks live together.
+    expect(CHECKS.findIndex((c) => c.name === 'chart')).toBe(CHECKS.findIndex((c) => c.name === 'apod') + 1);
+  });
+
+  it('passes on a current chart, alongside everything else', async () => {
+    const report = await run();
+    expect(chart(report)).toMatchObject({ ok: true, detail: 'ok' });
+    expect(report.ok).toBe(true);
+  });
+
+  it('FAILS on the route\'s 502 (what the redesign actually produced)', async () => {
+    const report = await run({ '/chart': { status: 502, body: JSON.stringify({ error: 'upstream_failed', detail: 'statista: no infographic cards parsed' }) } });
+    expect(chart(report)).toMatchObject({ ok: false, detail: 'HTTP 502' });
+    expect(report.ok).toBe(false);
+  });
+
+  it('FAILS on an empty list, even from a 200 with a fresh stamp', async () => {
+    const report = await run({ '/chart': { body: body({ chart: null, charts: [] }) } });
+    expect(chart(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+  });
+
+  it('FAILS on last-good served past its 2h window, tolerates it inside', async () => {
+    const old = await run({ '/chart': { body: body({ stale: true, updatedAt: nowSec() - 3 * 3600 }) } });
+    expect(chart(old)).toMatchObject({ ok: false, detail: 'stale 180 min old', stale: true });
+    const brief = await run({ '/chart': { body: body({ stale: true, updatedAt: nowSec() - 90 * 60 }) } });
+    expect(chart(brief)).toMatchObject({ ok: true, detail: 'ok (stale 90 min)', stale: true });
+    const maxStale = CHECKS.find((c) => c.name === 'chart').maxStaleSec;
+    expect(CHART_TTL_S * 1.5).toBeLessThan(maxStale); // every fresh answer lives the full TTL
+  });
+
+  it('FAILS on a frozen listing: fresh stamp, stale:false, but the newest chart three weeks old', async () => {
+    const old = new Date(Date.now() - 21 * 86400 * 1000).toISOString().slice(0, 10);
+    const report = await run({ '/chart': { body: body({ charts: [{ ...OK_BODIES['/chart'].charts[0], date: old }], classifiedTo: old }) } });
+    expect(chart(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+  });
+
+  it('FAILS when the chart pages stop answering: a current general list, but nothing classified for days', async () => {
+    const lagging = new Date(Date.now() - 6 * 86400 * 1000).toISOString().slice(0, 10);
+    expect(chart(await run({ '/chart': { body: body({ classifiedTo: lagging }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    expect(chart(await run({ '/chart': { body: body({ classifiedTo: null }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
   });
 });
 

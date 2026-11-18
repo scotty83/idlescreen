@@ -10,7 +10,7 @@
 import { CATALOG_IDS, CATALOG_GROUPS } from './catalog.js';
 import { DEFAULT_LAYOUT, normalizeLayout, migrateWidgetsToLayout, contentMaxH } from './layout.js';
 import { TFL_TUBE_IDS, TFL_LINE_IDS } from './tfl-lines.js';
-import { CHART_TOPICS, CHART_TOPIC_SLUGS } from './widgets/chart-topics.js';
+import { CHART_TOPICS, CHART_TOPIC_SLUGS, CHART_TOPIC_ALIASES } from './widgets/chart-topics.js';
 import { DEFAULT_SCHEDULE } from './modes.js';
 import { OCEAN_WIDGETS, hasOcean } from './surf-gate.js';
 
@@ -380,11 +380,19 @@ export function normalizeConfig(raw) {
       // back to the default: every topic on. Old single-topic configs
       // (raw.chart.topic) still migrate to a one-element array when no topics
       // array is present.
+      // Slugs saved before the November 2026 topic change are aliased first
+      // (environment merged into energy), then validated, then deduped, so
+      // ['environment', 'energy'] is one pick. The dropped business and
+      // science slugs have no alias and fall away like any unknown slug; a
+      // list of only those becomes [], the general listing, which is what the
+      // worker serves for them too.
       topics: (() => {
+        const alias = (s) => (Object.hasOwn(CHART_TOPIC_ALIASES, s) ? CHART_TOPIC_ALIASES[s] : s);
         if (Array.isArray(raw.chart?.topics)) {
-          return [...new Set(raw.chart.topics.filter((s) => CHART_TOPIC_SLUGS.has(s)))].slice(0, CHART_TOPIC_SLUGS.size);
+          return [...new Set(raw.chart.topics.map(alias).filter((s) => CHART_TOPIC_SLUGS.has(s)))].slice(0, CHART_TOPIC_SLUGS.size);
         }
-        if (raw.chart?.topics == null && CHART_TOPIC_SLUGS.has(raw.chart?.topic)) return [raw.chart.topic];
+        const legacy = alias(raw.chart?.topic);
+        if (raw.chart?.topics == null && CHART_TOPIC_SLUGS.has(legacy)) return [legacy];
         return [...DEFAULT_CONFIG.chart.topics];
       })(),
     },

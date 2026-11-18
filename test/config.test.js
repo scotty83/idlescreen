@@ -319,6 +319,27 @@ describe('chart config (v3 additive)', () => {
     // a present topics array wins over the legacy topic field
     expect(normalizeConfig({ chart: { topic: 'sports', topics: ['technology'] } }).chart.topics).toEqual(['technology']);
   });
+  it('migrates the November 2026 topic change: environment merges into energy, business and science fall away', () => {
+    expect(ALL_SLUGS).toHaveLength(16);
+    expect(normalizeConfig({ chart: { topics: ['environment'] } }).chart.topics).toEqual(['energy']);
+    // aliased BEFORE the dedupe, so the merged pair is one pick
+    expect(normalizeConfig({ chart: { topics: ['environment', 'energy', 'science'] } }).chart.topics).toEqual(['energy']);
+    expect(normalizeConfig({ chart: { topics: ['energy', 'environment'] } }).chart.topics).toEqual(['energy']);
+    // only dropped topics → [] (the general listing), never the all-on default
+    expect(normalizeConfig({ chart: { topics: ['business'] } }).chart.topics).toEqual([]);
+    expect(normalizeConfig({ chart: { topics: ['business', 'science'] } }).chart.topics).toEqual([]);
+    expect(normalizeConfig({ chart: { topics: ['business', 'finance'] } }).chart.topics).toEqual(['finance']);
+    // the legacy single-topic field takes the alias too
+    expect(normalizeConfig({ chart: { topic: 'environment' } }).chart.topics).toEqual(['energy']);
+  });
+  it('an old all-19-topics selection normalizes to the new all-on default (and stays off the wire)', async () => {
+    const OLD_ALL = ['artificial intelligence', 'business', 'consumer goods', 'e-commerce', 'economy', 'energy',
+      'entertainment', 'environment', 'finance', 'health', 'internet', 'media', 'retail', 'science', 'society',
+      'sports', 'technology', 'transportation', 'travel'];
+    const cfg = normalizeConfig({ chart: { topics: OLD_ALL } });
+    expect(cfg.chart.topics).toEqual(ALL_SLUGS);
+    expect((await encodeConfig(cfg)).length).toBe((await encodeConfig(normalizeConfig({}))).length);
+  });
   it('strips a default chart from the wire but keeps a customized one', async () => {
     const plainDec = await decodeConfig(await encodeConfig(normalizeConfig({})));
     expect(plainDec.chart).toEqual({ excludePolitics: true, topics: ALL_SLUGS }); // re-derived on decode
@@ -339,9 +360,9 @@ describe('chart config (v3 additive)', () => {
     expect((await decodeConfig(enc)).chart).toEqual({ excludePolitics: true, topics: [] });
   });
   it('round-trips a partial selection plus the default politics filter', async () => {
-    const partial = normalizeConfig({ chart: { topics: ['finance', 'health', 'science'] } });
+    const partial = normalizeConfig({ chart: { topics: ['finance', 'health', 'sports'] } });
     const dec = await decodeConfig(await encodeConfig(partial));
-    expect(dec.chart).toEqual({ excludePolitics: true, topics: ['finance', 'health', 'science'] });
+    expect(dec.chart).toEqual({ excludePolitics: true, topics: ['finance', 'health', 'sports'] });
   });
   it('round-trips a politics opt-out with the default (all) topics', async () => {
     const noFilter = normalizeConfig({ chart: { excludePolitics: false } });

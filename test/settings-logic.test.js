@@ -937,6 +937,13 @@ describe('Chart of the Day pane (all topics on by default)', () => {
     closeSettings();
   });
 
+  it('renders the merged Energy & Environment label as text, ampersand intact', async () => {
+    await open(normalizeConfig({}));
+    const row = pills().find((p) => p.dataset.topic === 'energy').closest('.row');
+    expect(row.querySelector('.row__label').textContent).toBe('Energy & Environment');
+    closeSettings();
+  });
+
   it('renders a saved partial selection as exactly those pills', async () => {
     await open(normalizeConfig({ chart: { topics: ['finance', 'sports'] } }));
     expect(lit()).toBe(2);

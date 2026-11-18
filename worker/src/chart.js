@@ -1,17 +1,31 @@
-// Statista "Chart of the Day". No feed exists, so this scrapes the listing
-// page's infographic cards (data-infographic-panel-card blocks) and serves
-// the newest one. The page is session-cookie gated (a 302 sets STATSESSID and
-// bounces back), so fetchChart does one manual-redirect round to collect
-// cookies, then refetches. Infographic images hotlink freely from
-// cdn.statcdn.com (probe-verified: no cookie/referer checks) and carry the
-// Statista branding baked in; the card adds a "Statista" credit line (their
-// charts are CC BY-ND with attribution).
+// Statista "Chart of the Day". No feed exists. Until the November 2026
+// redesign this scraped the /chartoftheday/ listing and its per-topic pages;
+// those now 301 to /recent/infographics/ and the per-topic pages are gone for
+// good. What replaced them, and what this file reads instead:
+//   - the listing, /recent/infographics/ (and its page 2), a React Router app
+//     whose data rides in an embedded turbo-stream payload: the newest 100
+//     infographics per page, with no topic on them;
+//   - each chart's own page, whose tag-manager metas and ad-targeting line
+//     carry Statista's industry taxonomy, which is what a topic is built from.
+// Fetching a chart page per chart per request would be ruinous, so the worker
+// keeps one index of recent charts in the Cache API (never KV: see cached() in
+// index.js), classifies each chart once, and serves every topic by filtering
+// that index. Infographic images hotlink freely from cdn.statcdn.com
+// (probe-verified: no cookie/referer checks) and carry the Statista branding
+// baked in; the card adds a "Statista" credit line (their charts are CC BY-ND
+// with attribution). Neither page needs a cookie any more, so the old SSO
+// cookie-jar walk is gone too.
 
-const PAGE = 'https://www.statista.com/chartoftheday/';
+const SITE = 'https://www.statista.com';
+const LISTING = `${SITE}/recent/infographics/`;
+const LISTING_P2 = `${LISTING}p/2/`;
+const IMAGE = (id) => `https://cdn.statcdn.com/Infographic/images/normal/${id}.jpeg`;
+
 // Full browser UA: thin agents from datacenter egress get bounced by some
 // CDNs (the AWS status lesson) — assume Statista is at least as picky.
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const HEADERS = { 'User-Agent': UA, Accept: 'text/html' };
 
 const decode = (s) =>
   s
@@ -23,25 +37,28 @@ const decode = (s) =>
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
 
-// Curated per-topic slugs the /chart route accepts (label + slug). Each was
-// verified to load the SSO chain and return live infographic cards; some slugs
-// carry spaces (URL-encoded on fetch). Open vocabulary — there is no master
-// list, so this is a hand-picked allowlist. Keep it alphabetical by label.
+// How long one answer of the /chart route serves (its cache TTL, and so the
+// oldest a healthy answer gets; the health check's age window builds on it).
+// Statista posts on weekdays, so an hour bounds how late a board sees a chart.
+export const CHART_TTL_S = 3600;
+
+// The topics a board can pick, [label, slug], alphabetical by label. Slugs are
+// plain identifiers now (they used to be Statista URL slugs); every one that
+// survived the redesign kept its old spelling so saved boards keep working.
+// topicsOf() maps each onto Statista's industry taxonomy. Mirrored by
+// site/js/widgets/chart-topics.js; keep the two in sync.
 export const CHART_TOPICS = [
   ['Artificial Intelligence', 'artificial intelligence'],
-  ['Business', 'business'],
   ['Consumer Goods', 'consumer goods'],
   ['E-Commerce', 'e-commerce'],
   ['Economy', 'economy'],
-  ['Energy', 'energy'],
+  ['Energy & Environment', 'energy'],
   ['Entertainment', 'entertainment'],
-  ['Environment', 'environment'],
   ['Finance', 'finance'],
   ['Health', 'health'],
   ['Internet', 'internet'],
   ['Media', 'media'],
   ['Retail', 'retail'],
-  ['Science', 'science'],
   ['Society', 'society'],
   ['Sports', 'sports'],
   ['Technology', 'technology'],
@@ -50,74 +67,509 @@ export const CHART_TOPICS = [
 ];
 const TOPIC_SLUGS = new Set(CHART_TOPICS.map(([, slug]) => slug));
 
-// Parse every infographic card on the page; return them newest-first (document
-// order breaks a date tie) capped to the freshest ~10 so a client-side filter
-// (e.g. hide-politics) always has a fallback and never blanks the card. Throws
-// when nothing parses so the route's cached() falls back to the stale copy
-// instead of caching junk.
-export function mapChart(html) {
-  const cards = [];
-  const re = /href="\/chart\/(\d+)\/([a-z0-9-]+)\/"[^>]*[\s\S]{0,200}?data-infographic-panel-card([\s\S]*?)<\/a>/g;
-  for (const m of html.matchAll(re)) {
-    const [, id, slug, body] = m;
-    const alt = /alt="Infographic - ([^"]*)"/.exec(body);
-    const date = /datetime="(\d{4}-\d{2}-\d{2})"/.exec(body);
-    const desc = /<\/time>\s*<\/div>\s*([\s\S]*?)<span class="infographicsPanelCard__readMore"/.exec(body);
-    if (!alt || !date) continue;
-    cards.push({
+// Slugs a board saved before the redesign that are no longer topics. Energy
+// and Environment merged into one topic under the energy slug; Business and
+// Science were dropped (no industry in the taxonomy matches either well), so
+// they read as "no topic": the newest charts overall.
+const LEGACY_TOPICS = new Map([
+  ['environment', 'energy'],
+  ['business', ''],
+  ['science', ''],
+]);
+
+// '' for no topic (the general list), the slug to serve for a known topic or
+// a legacy one, null for anything else (the route answers 400 before any
+// upstream fetch, so a bad slug can never cost a refresh).
+export function resolveTopic(raw) {
+  if (raw == null || raw === '') return '';
+  if (TOPIC_SLUGS.has(raw)) return raw;
+  if (LEGACY_TOPICS.has(raw)) return LEGACY_TOPICS.get(raw);
+  return null;
+}
+
+// ---- Topic rules -----------------------------------------------------------
+// A chart page's `branchen` targeting lists its industry path in Statista's
+// taxonomy: one to three numeric ids, leaf first, top-level industry last
+// (order is not relied on). Ids are kept as strings, as the page gives them.
+
+// Top-level industries that are a topic of their own.
+const BRANCH_TOPICS = new Map([
+  ['415', 'consumer goods'], // Consumer Goods & FMCG
+  ['413', 'e-commerce'], // E-Commerce
+  ['408', 'energy'], // Energy & Environment
+  ['414', 'finance'], // Finance, Insurance & Real Estate
+  ['412', 'health'], // Health, Pharma & Medtech
+  ['424', 'internet'], // Internet
+  ['417', 'media'], // Media
+  ['423', 'retail'], // Retail & Trade
+  ['411', 'society'], // Society
+  ['409', 'sports'], // Sports & Recreation
+  ['418', 'technology'], // Technology & Telecommunications
+  ['419', 'transportation'], // Transportation & Logistics
+  ['420', 'travel'], // Travel, Tourism & Hospitality
+  // Neighbouring industries with no topic of their own, folded into the
+  // closest one so their charts still reach a board.
+  ['479', 'media'], // Advertising & Marketing
+  ['407', 'technology'], // Metals & Electronics
+  ['416', 'society'], // Life
+]);
+
+// Economy & Politics is one industry upstream, but a board that picks Economy
+// wants money, not elections. So politics charts (Politics & Government) leave
+// the topic unless they are about Government Finances.
+const ECONOMY_POLITICS = '2535'; // Economy & Politics
+const POLITICS = '966'; // Politics & Government
+const GOVERNMENT_FINANCES = '968'; // Government Finances
+
+// Sub-industries of Media (417) that make a chart entertainment as well.
+const ENTERTAINMENT_BRANCHES = ['475', '476', '478']; // Audio; TV, video & film; Video gaming & esports
+
+// Artificial Intelligence is its own industry, but most AI charts sit under
+// Technology or Internet and only their tags say AI, so tags count too. The
+// acronyms are case-sensitive on purpose: "AIRLINES" or "Air travel" must not
+// read as AI.
+const AI_BRANCH = '2570'; // Artificial Intelligence
+const AI_TAG = /\bAI\b|\bChatGPT\b|\bLLMs?\b/;
+const AI_PHRASE = /artificial intelligence/i;
+
+// The topic slugs a classification earns, in CHART_TOPICS order. Derived on
+// every serve rather than stored, so a rule change needs no re-fetch.
+export function topicsOf(cls) {
+  if (!cls) return [];
+  const b = new Set((Array.isArray(cls.b) ? cls.b : []).map(String));
+  const tags = Array.isArray(cls.tags) ? cls.tags : [];
+  const got = new Set();
+  for (const id of b) if (BRANCH_TOPICS.has(id)) got.add(BRANCH_TOPICS.get(id));
+  if (b.has(ECONOMY_POLITICS) && !(b.has(POLITICS) && !b.has(GOVERNMENT_FINANCES))) got.add('economy');
+  if (ENTERTAINMENT_BRANCHES.some((id) => b.has(id))) got.add('entertainment');
+  if (b.has(AI_BRANCH) || tags.some((t) => AI_TAG.test(t) || AI_PHRASE.test(t))) got.add('artificial intelligence');
+  return CHART_TOPICS.map(([, slug]) => slug).filter((slug) => got.has(slug));
+}
+
+// ---- Listing ---------------------------------------------------------------
+
+// The JS string literal passed to the first streamController.enqueue(...),
+// found by scanning for its closing quote rather than by regex: the payload is
+// most of a 1MB page, and a backtracking pattern over that is a gamble.
+function streamLiteral(html) {
+  const open = html.indexOf('streamController.enqueue("');
+  if (open < 0) return null;
+  const start = open + 'streamController.enqueue('.length;
+  for (let i = start + 1; i < html.length; i += 1) {
+    if (html[i] === '\\') i += 1;
+    else if (html[i] === '"') return html.slice(start, i + 1);
+  }
+  return null;
+}
+
+// Rebuild the turbo-stream "flat" array into plain values. flat[0] is the
+// root; an object {"_1":2} means key flat[1] holds hydrate(2); an array holds
+// indices; a negative index is a sentinel (undefined, null, ...) read as null.
+// An array that opens with a string is a typed value (a Date, a Map); none
+// occur in this payload, so one is passed through as is. The memo makes a
+// shared or cyclic reference resolve to the same object instead of recursing.
+function hydrate(flat) {
+  const memo = new Map();
+  const at = (i) => {
+    if (!Number.isInteger(i) || i < 0 || i >= flat.length) return null;
+    if (memo.has(i)) return memo.get(i);
+    const v = flat[i];
+    if (Array.isArray(v)) {
+      if (typeof v[0] === 'string') {
+        memo.set(i, v);
+        return v;
+      }
+      const out = [];
+      memo.set(i, out);
+      for (const x of v) out.push(at(x));
+      return out;
+    }
+    if (v && typeof v === 'object') {
+      const out = {};
+      memo.set(i, out);
+      for (const [k, x] of Object.entries(v)) {
+        const key = flat[Number(k.slice(1))];
+        if (typeof key === 'string') out[key] = at(x);
+      }
+      return out;
+    }
+    memo.set(i, v);
+    return v;
+  };
+  return at(0);
+}
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const DESC_MAX = 500;
+const DESC_MIN_SENTENCE = 120;
+
+// A sentence end: closing punctuation, a space, then the capital, digit or
+// quote that opens the next sentence. The lookbehind refuses a period that
+// follows a capital letter, so "U.S. respondents" and "Washington, D.C. has"
+// are not read as ends (Statista's copy is full of both).
+const SENTENCE_END = /(?<![A-Z])[.!?] (?=[A-Z0-9"“‘])/g;
+
+// Descriptions run 900 to 3500 characters (the whole article); the viewer
+// wants the opening. Cut at the last sentence end inside the limit, unless
+// that would leave a stub, in which case a hard cut reads better.
+function clip(text) {
+  const t = text.replace(/\s+/g, ' ').trim();
+  if (t.length <= DESC_MAX) return t;
+  const window = t.slice(0, DESC_MAX + 2);
+  let end = -1;
+  for (const m of window.matchAll(SENTENCE_END)) end = m.index + 1;
+  return end >= DESC_MIN_SENTENCE ? t.slice(0, end) : t.slice(0, DESC_MAX).trimEnd();
+}
+
+// Every listed infographic, in listing order (newest update first):
+// [{ id, path, title, desc, date, sponsored }]. Throws when nothing parses, so
+// the refresh fails and cached() serves last-good instead of caching junk.
+export function parseListing(html) {
+  const literal = streamLiteral(String(html ?? ''));
+  if (!literal) throw new Error('statista: no stream payload in the listing page');
+  let root;
+  try {
+    const stream = JSON.parse(literal);
+    const nl = stream.indexOf('\n');
+    root = hydrate(JSON.parse(nl < 0 ? stream : stream.slice(0, nl)));
+  } catch {
+    throw new Error('statista: unreadable stream payload in the listing page');
+  }
+  // The route id (routes/recent-en-index today) is the app's to rename, so
+  // take whichever route's loader data carries the results.
+  const route = Object.values(root?.loaderData ?? {}).find((v) => Array.isArray(v?.recentResponse?.results));
+  if (!route) throw new Error('statista: no results array in the listing payload');
+  const out = [];
+  for (const r of route.recentResponse.results) {
+    if (!r || r.contentType !== 'infographic' || r.premium === true) continue;
+    const id = String(r.contentId ?? '');
+    if (!/^\d+$/.test(id)) continue;
+    const path = typeof r.urlPath === 'string' ? r.urlPath : '';
+    // The path becomes a fetch URL and a link on the board, so it must be this
+    // chart's own page and nothing that could break out of an attribute.
+    if (!new RegExp(`^/chart/${id}/[^\\s"'<>\\\\]*$`).test(path)) continue;
+    const title = typeof r.title === 'string' ? r.title.trim().slice(0, 200) : '';
+    if (!title) continue;
+    const updated = typeof r.updated === 'string' ? r.updated.slice(0, 10) : '';
+    const released = typeof r.released === 'string' ? r.released.slice(0, 10) : '';
+    const date = DAY.test(updated) ? updated : DAY.test(released) ? released : '';
+    if (!date) continue;
+    out.push({
       id,
-      title: decode(alt[1]).trim().slice(0, 200),
-      desc: decode((desc?.[1] ?? '').replace(/<[^>]*>/g, '')).trim().slice(0, 500),
-      date: date[1],
-      url: `https://cdn.statcdn.com/Infographic/images/normal/${id}.jpeg`,
-      link: `https://www.statista.com/chart/${id}/${slug}/`,
+      path,
+      title,
+      desc: clip(typeof r.description === 'string' ? r.description : ''),
+      date,
+      sponsored: /sponsored/i.test(typeof r.subtitle === 'string' ? r.subtitle : ''),
     });
   }
-  if (!cards.length) throw new Error('statista: no infographic cards parsed');
-  // Stable newest-first: sort by date desc, keeping the original document order
-  // for same-date cards (Array.prototype.sort is stable in V8/workerd).
-  const charts = cards
-    .map((c, i) => ({ c, i }))
-    .sort((a, b) => (a.c.date < b.c.date ? 1 : a.c.date > b.c.date ? -1 : a.i - b.i))
-    .slice(0, 10)
-    .map(({ c }) => c);
+  if (!out.length) throw new Error('statista: no infographics in the listing payload');
+  return out;
+}
+
+// ---- Chart page ------------------------------------------------------------
+
+const BRANCHEN = /setTargeting\(\s*['"]branchen['"]\s*,\s*\[([^\]]*)\]/;
+const GTM_META = /<meta\b[^>]*\bid="gtm_infographic_(masterBranch|branch1|topic|masterTag\d+|tag\d+)"[^>]*>/g;
+const MAX_TAGS = 30;
+const MAX_TAG_LEN = 80;
+
+// A chart page's classification, { b: [industry ids], tags: [labels] }, or
+// null when the page has no branchen targeting call at all (a reshaped page,
+// an error page): the caller counts that as a failed try rather than a chart
+// with no topic, so a later refresh asks again. A call with an EMPTY list is
+// different, and real: Statista files some charts under no industry (a chart
+// on terrorism fears, seen live 2026-11-18). That is an answer, a chart that
+// belongs to no topic unless its tags say AI, and it must not be asked again.
+export function parseChartPage(html) {
+  const s = String(html ?? '');
+  const m = BRANCHEN.exec(s);
+  if (!m) return null;
+  const b = [...m[1].matchAll(/\d+/g)].map(([id]) => id);
+  const tags = [];
+  for (const [tag] of s.matchAll(GTM_META)) {
+    const value = /\bdata-page="([^"]*)"/.exec(tag);
+    if (!value) continue;
+    const t = decode(value[1].replace(/&nbsp;/g, ' ')).replace(/\s+/g, ' ').trim().slice(0, MAX_TAG_LEN);
+    if (t && !tags.includes(t)) tags.push(t);
+    if (tags.length >= MAX_TAGS) break;
+  }
+  return { b, tags };
+}
+
+// Time limits, sized together: the health monitor gives a probe 13s and a
+// board gives a fetch 15s, and a cold refresh spends the listing wait, then
+// the classification budget, then the last chart page started just inside it.
+// 5s + 3.5s + 3.5s keeps the worst case at 12s; a normal one takes two or three.
+const LISTING_TIMEOUT_MS = 5000;
+const PAGE_TIMEOUT_MS = 3500;
+// The taxonomy sits in the first ~12KB of a ~315KB page; reading the rest
+// would spend bandwidth and CPU on markup nobody looks at.
+const HEAD_BYTES = 64 * 1024;
+
+async function classifyOne(path) {
+  const res = await fetch(`${SITE}${path}`, {
+    redirect: 'follow',
+    headers: HEADERS,
+    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`HTTP ${res.status}`);
+  }
+  if (!res.body) return parseChartPage(await res.text());
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let text = '';
+  let bytes = 0;
+  try {
+    while (bytes < HEAD_BYTES && !BRANCHEN.test(text)) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      text += dec.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return parseChartPage(text);
+}
+
+// ---- Index -----------------------------------------------------------------
+
+const INDEX_FRESH_MS = 30 * 60 * 1000; // a newer listing is worth a look every half hour
+const INDEX_KEEP_S = 30 * 86400; // the Cache API may evict sooner; a rebuild just costs a cold refresh
+const INDEX_CAP = 300;
+const SERVE_N = 10;
+const CLASSIFY_MAX = 48; // chart pages per refresh: a cold index fills over a few refreshes
+const CLASSIFY_PARALLEL = 6;
+const CLASSIFY_BUDGET_MS = 3500; // no new chart page starts after this, so a slow Statista can't stall a board
+// A chart page that failed is asked again later, never given up on: the wait
+// doubles from half an hour (so the first retry is the next refresh) to a day.
+// A count that stopped at "three strikes" would turn an afternoon of Statista
+// refusing this worker into charts that stay topic-less for as long as the
+// index lives; with a wait that only grows, a page that is broken for good
+// costs one fetch a day and everything else recovers on its own.
+const RETRY_BASE_MS = 30 * 60 * 1000;
+const RETRY_MAX_MS = 24 * 3600 * 1000;
+
+const indexKey = (origin) => new Request(`${origin}/__cache/chart-index/v1`);
+const untried = (c) => c.cls == null && !c.tries;
+const due = (c, now) =>
+  c.cls == null && (!c.tries || now - (c.triedAt ?? 0) >= Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (c.tries - 1)));
+
+async function readIndex(origin) {
+  try {
+    const hit = await caches.default.match(indexKey(origin));
+    if (!hit) return null;
+    const index = await hit.json();
+    return Array.isArray(index?.charts) ? index : null;
+  } catch {
+    return null; // an unreadable entry is no index: rebuild
+  }
+}
+
+async function fetchListing(url) {
+  const res = await fetch(url, { redirect: 'follow', headers: HEADERS, signal: AbortSignal.timeout(LISTING_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`statista listing ${res.status}`);
+  return parseListing(await res.text());
+}
+
+async function writeIndex(origin, index) {
+  try {
+    await caches.default.put(indexKey(origin), new Response(JSON.stringify(index), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${INDEX_KEEP_S}` },
+    }));
+  } catch (err) {
+    // Best effort: this request still serves the index it just built.
+    console.warn(`[chart] index write failed: ${String(err?.message ?? err)}`);
+  }
+}
+
+// Classify the newest unclassified charts that `want` selects, in place, a few
+// at a time. One failure costs that chart a try and nothing else.
+async function classify(charts, want = due) {
+  const started = Date.now();
+  const queue = charts.filter((c) => want(c, started)).slice(0, CLASSIFY_MAX);
+  let next = 0;
+  const lane = async () => {
+    while (next < queue.length && Date.now() - started < CLASSIFY_BUDGET_MS) {
+      const c = queue[next];
+      next += 1;
+      try {
+        const cls = await classifyOne(c.path);
+        if (cls) {
+          c.cls = cls;
+          continue;
+        }
+        console.warn(`[chart] ${c.id}: no branchen targeting on the chart page`);
+      } catch (err) {
+        console.warn(`[chart] ${c.id}: chart page failed: ${String(err?.message ?? err)}`);
+      }
+      c.tries = (c.tries ?? 0) + 1;
+      c.triedAt = Date.now();
+    }
+  };
+  await Promise.all(Array.from({ length: CLASSIFY_PARALLEL }, lane));
+}
+
+// Re-read the listing and fold it into the index. A failed page 1 throws even
+// when an old index is at hand: serving that would hand cached() a "fresh"
+// answer built from a listing that may be weeks old, where throwing lets it
+// serve the route's own last-good copy marked stale, or the error. `light`
+// (another request holds the refresh, see loadIndex) skips the chart pages
+// and the write: this request still answers from the current listing, and
+// leaves classifying and storing to the one already doing it.
+async function refreshIndex(origin, old, { light = false } = {}) {
+  const [p1, p2] = await Promise.allSettled([fetchListing(LISTING), fetchListing(LISTING_P2)]);
+  if (p1.status === 'rejected') throw p1.reason;
+  if (p2.status === 'rejected') {
+    console.warn(`[chart] listing page 2 failed (ignored): ${String(p2.reason?.message ?? p2.reason)}`);
+  }
+  const listed = [...p1.value, ...(p2.status === 'fulfilled' ? p2.value : [])];
+  const prev = new Map((old?.charts ?? []).map((c) => [c.id, c]));
+  const seen = new Set();
+  const merged = [];
+  for (const item of listed) {
+    if (seen.has(item.id)) continue;
+    // Marked seen even when sponsored, so an old copy of a chart that has
+    // since turned sponsored is dropped below rather than kept.
+    seen.add(item.id);
+    if (item.sponsored) continue;
+    const was = prev.get(item.id);
+    merged.push({
+      id: item.id,
+      path: item.path,
+      title: item.title,
+      desc: item.desc,
+      date: item.date,
+      cls: was?.cls ?? null,
+      tries: was?.tries ?? 0,
+      ...(was?.triedAt ? { triedAt: was.triedAt } : {}),
+    });
+  }
+  // Charts that have scrolled off the listing stay reachable through the index
+  // alone, which is how a quiet topic keeps a chart to show.
+  for (const c of old?.charts ?? []) {
+    if (!seen.has(c.id)) {
+      seen.add(c.id);
+      merged.push(c);
+    }
+  }
+  // Newest first; Array.prototype.sort is stable, so a date tie keeps the
+  // listing's own order (which is by update time).
+  merged.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const charts = merged.slice(0, INDEX_CAP);
+  if (light) return { builtAt: Date.now(), charts };
+  await classify(charts);
+  const index = { builtAt: Date.now(), charts };
+  await writeIndex(origin, index);
+  return index;
+}
+
+// Inside the fresh window the listing is not re-read, but charts that were
+// never tried still get their turn: a cold colo's first refresh stops at
+// CLASSIFY_MAX, and without this the rest would wait out the whole window
+// while topics served their fallback (see the catch-up note in fetchChart).
+// Only never-tried charts: a page that failed waits out its retry delay (see
+// RETRY_BASE_MS), so Statista trouble is not answered with a retry on every
+// poll. builtAt is kept, so the listing refresh stays on schedule.
+async function catchUp(origin, index) {
+  await classify(index.charts, untried);
+  await writeIndex(origin, index);
+  return index;
+}
+
+// One refresh at a time. Every topic key (17 of them) expires on its own hour
+// and a floor of boards waking together all miss at once; unguarded, each of
+// those requests would read the same four dozen chart pages, a burst Statista
+// could fairly answer by refusing this worker. The claim is a short-lived
+// Cache API entry, so it holds across isolates in the colo. It is not atomic
+// (two requests a few milliseconds apart can both claim), which costs one
+// duplicate pass, not correctness. A promise shared between requests would be
+// tighter, but one request awaiting I/O that another started is exactly what
+// workerd warns against: if the starter is cancelled, the waiter hangs.
+const BUSY_S = 30; // longer than the slowest refresh; released as soon as it ends anyway
+const busyKey = (origin) => new Request(`${origin}/__cache/chart-index/busy`);
+const isBusy = async (origin) => {
+  try {
+    return Boolean(await caches.default.match(busyKey(origin)));
+  } catch {
+    return false;
+  }
+};
+const claim = (origin) =>
+  caches.default
+    .put(busyKey(origin), new Response('1', { headers: { 'Cache-Control': `max-age=${BUSY_S}` } }))
+    .catch(() => {});
+const release = (origin) => caches.default.delete(busyKey(origin)).catch(() => {});
+
+async function loadIndex(origin) {
+  const old = await readIndex(origin);
+  const fresh = old && Date.now() - old.builtAt < INDEX_FRESH_MS;
+  if (fresh && !old.charts.some(untried)) return old;
+  if (await isBusy(origin)) {
+    // Someone is already at the chart pages. A fresh index answers as it
+    // stands; a missing or aged one still owes this request the current
+    // listing, just without a second pass over the chart pages.
+    return fresh ? old : refreshIndex(origin, old, { light: true });
+  }
+  await claim(origin);
+  try {
+    return await (fresh ? catchUp(origin, old) : refreshIndex(origin, old));
+  } finally {
+    await release(origin);
+  }
+}
+
+// ---- Serving ---------------------------------------------------------------
+
+const served = (c) => ({
+  id: c.id,
+  title: c.title,
+  desc: c.desc,
+  date: c.date,
+  url: IMAGE(c.id),
+  link: `${SITE}${c.path}`,
+  topics: topicsOf(c.cls),
+});
+
+// The newest charts for a topic ('' = the newest overall). A topic with no
+// classified chart falls back to the general list, flagged, so a board never
+// blanks on a quiet topic.
+export async function fetchChart(topic = '', { origin } = {}) {
+  if (!origin) throw new Error('chart: origin required');
+  const t = resolveTopic(topic);
+  if (t === null) throw new Error(`statista: unknown topic "${topic}"`);
+  const { charts: all = [] } = await loadIndex(origin);
+  if (!all.length) throw new Error('statista: the chart index is empty');
+  let picked = all.slice(0, SERVE_N);
+  let fallback = false;
+  if (t) {
+    const hits = all.filter((c) => c.cls && topicsOf(c.cls).includes(t)).slice(0, SERVE_N);
+    if (hits.length) picked = hits;
+    else fallback = true;
+  }
+  const charts = picked.map(served);
   // Keep `chart` (the newest) beside `charts[]` so a client that only reads the
   // legacy singular field keeps working when this worker deploys ahead of the
   // new widget (e.g. prod worker updated, prod chart widget not yet).
-  return { chart: charts[0], charts };
-}
-
-// topic '' (default) hits the global listing; a validated slug re-points the
-// scrape at the per-topic page. The route validates against CHART_TOPICS before
-// calling here, but re-check so a bad slug can never smuggle path segments.
-function topicUrl(topic) {
-  if (!topic) return PAGE;
-  if (!TOPIC_SLUGS.has(topic)) throw new Error(`statista: unknown topic "${topic}"`);
-  return `${PAGE}${encodeURIComponent(topic)}/`;
-}
-
-export async function fetchChart(topic = '') {
-  // The page bounces through /sso/iplogin and back, setting cookies at EVERY
-  // hop (STATSESSID, __sso_iplogin, …). fetch's follow mode drops cookies
-  // between hops, so walk the chain manually with a tiny cookie jar.
-  const start = topicUrl(topic);
-  const jar = new Map();
-  let url = start;
-  for (let hop = 0; hop < 6; hop += 1) {
-    const headers = { 'User-Agent': UA, Accept: 'text/html' };
-    if (jar.size) headers.Cookie = [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
-    const res = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(10000) });
-    for (const c of res.headers.getSetCookie?.() ?? [res.headers.get('set-cookie')].filter(Boolean)) {
-      const pair = c.split(';')[0];
-      const eq = pair.indexOf('=');
-      if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
-    }
-    if (res.status >= 300 && res.status < 400) {
-      url = new URL(res.headers.get('Location') ?? start, url).href;
-      continue;
-    }
-    if (!res.ok) throw new Error(`statista ${res.status}`);
-    return mapChart(await res.text());
-  }
-  throw new Error('statista: redirect loop (cookies rejected)');
+  // classifiedTo is the date of the newest chart that has a classification.
+  // The health check reads it against the newest chart's date: topics fed by
+  // an index nobody can classify any more (Statista refusing the chart pages,
+  // or reshaping them) would otherwise go quietly stale behind a healthy
+  // general list.
+  const out = { chart: charts[0], charts, topic: t, fallback, classifiedTo: all.find((c) => c.cls)?.date ?? null };
+  // Catch-up. A cold colo's first refresh classifies at most CLASSIFY_MAX
+  // charts, so a quiet topic can come back empty only because its charts are
+  // still waiting their turn. Cached normally, that fallback would pin the
+  // newest-overall list on the topic for the route's full hour. partial: true
+  // makes cached() keep it for at most 120s and never write it over the 24h
+  // backup, so the next polls reach loadIndex again, each classifying the next
+  // batch (catchUp), and the topic converges on its own charts within minutes.
+  // Once every chart has had its turn, a fallback is the honest answer and
+  // caches for the full hour (a chart waiting out a retry delay will not be
+  // asked again inside two minutes, so it does not count here).
+  if (fallback && all.some(untried)) out.partial = true;
+  return out;
 }

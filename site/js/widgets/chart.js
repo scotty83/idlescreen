@@ -78,15 +78,17 @@ export function render(el, vm, cfg) {
 // Deterministic rotation slot: which of the selected topics to show right now.
 // Keyed off wall-clock so every board lands on the same topic within a slot
 // (fleet-consistent, no per-device drift), and advances once per refresh
-// window. '' (empty/non-array topics) preserves the any/global listing.
+// window. '' (empty/non-array topics) asks for the newest charts overall.
 export function currentTopic(topics, now = Date.now(), slotMs = meta.refreshMs) {
   if (!Array.isArray(topics) || !topics.length) return '';
   return topics[Math.floor(now / slotMs) % topics.length];
 }
 
 export async function fetchData(cfg, net) {
-  // A configured topic re-points the scrape at the per-topic Statista page; the
-  // worker validates the slug and caches it under `chart:<topic>` (the global
+  // A configured topic asks the worker for that topic's newest charts: it keeps
+  // a classified index of Statista's recent charts and filters it, falling back
+  // to the newest overall when the topic has nothing recent, so the card never
+  // blanks. It validates the slug and caches under `chart:<topic>` (the global
   // default stays one fleet-wide entry). Client-side filtering picks the card.
   // Multiple topics cycle deterministically on each refresh (see currentTopic).
   const topic = currentTopic(cfg?.chart?.topics);

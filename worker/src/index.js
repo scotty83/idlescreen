@@ -19,7 +19,7 @@ import { fetchApod, APOD_TTL_S } from './apod.js';
 import { fetchCitibike } from './citibike.js';
 import { fetchTfl } from './tfl.js';
 import { parseBeacon, beaconDataPoint, deviceModel, originHost, MAX_BODY as BEACON_MAX_BYTES } from './fleet.js';
-import { fetchChart, CHART_TOPICS } from './chart.js';
+import { fetchChart, resolveTopic, CHART_TTL_S } from './chart.js';
 import { fetchF1, mendF1 } from './f1.js';
 import { fetchGolf, fetchTennis } from './scores.js';
 import { fetchAmtrak } from './amtrak.js';
@@ -736,17 +736,19 @@ const handlers = {
     }
 
     if (path === '/chart' && request.method === 'GET') {
-      // Statista Chart of the Day — scraped from the listing page (see chart.js),
-      // 1h TTL; new charts post weekdays. `?topic=` re-points the scrape at a
-      // per-topic page — validated against the curated CHART_TOPICS allowlist so
-      // an unknown slug can't blank the card. No topic → the global cache key
-      // (one fleet-wide entry); a valid topic → `chart:<topic>`.
-      const topic = url.searchParams.get('topic') ?? '';
-      if (topic && !CHART_TOPICS.some(([, slug]) => slug === topic)) {
-        return json({ error: 'bad_topic' }, 400);
-      }
+      // Statista Chart of the Day, served from a classified index of recent
+      // charts (see chart.js), 1h TTL; new charts post weekdays. `?topic=`
+      // filters that index to one topic, and a topic with nothing recent
+      // answers with the newest charts overall (flagged fallback) so the card
+      // never blanks. The slug is resolved first: an unknown one is a 400
+      // before any upstream fetch, and a legacy one is keyed under what it
+      // resolves to, so ?topic=environment shares chart:energy and
+      // ?topic=business shares the general `chart` entry instead of each
+      // minting a cache key of its own.
+      const topic = resolveTopic(url.searchParams.get('topic'));
+      if (topic === null) return json({ error: 'bad_topic' }, 400);
       const chartKey = topic ? `chart:${topic}` : 'chart';
-      return cached(url.origin, chartKey, 3600, () => fetchChart(topic));
+      return cached(url.origin, chartKey, CHART_TTL_S, () => fetchChart(topic, { origin: url.origin }));
     }
 
     if (path === '/apod' && request.method === 'GET') {
