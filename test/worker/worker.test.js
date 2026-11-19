@@ -3801,6 +3801,7 @@ describe('the health alert state lives in KV, because the Cache API is colo-loca
     ['chart', { charts: [{
       id: '35531',
       title: 'Where Americans Expect the Best Deals This Holiday Season',
+      desc: 'This chart shows the share of U.S. respondents who expect the best deals on Black Friday.',
       url: 'https://cdn.statcdn.com/Infographic/images/normal/35531.jpeg',
       date: new Date().toISOString().slice(0, 10), // the check reads the newest chart's own clock too
       topics: ['consumer goods', 'retail'], // and wants a topic on at least one chart served
@@ -3831,6 +3832,8 @@ describe('the health alert state lives in KV, because the Cache API is colo-loca
     { match: /unsleep\.io\/data\/changelog\.json/, body: [{ date: 'August 18', items: [] }] },
     { match: /idlescreen\.io\/data\/changelog\.json/, body: [{ date: 'August 18', items: [] }] },
     { match: /api\.open-meteo\.com/, body: { hourly: { temperature_2m: [70, 71] } } },
+    // The chart check fetches the image its payload names.
+    { match: /cdn\.statcdn\.com\/Infographic\/images\/normal\/35531\.jpeg/, body: 'jpeg', ctype: 'image/jpeg' },
   ];
   const slackRoute = () => ({ match: /hooks\.slack\.com/, times: 3, body: { ok: true } });
 

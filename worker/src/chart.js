@@ -132,6 +132,23 @@ const AI_BRANCH = '2570'; // Artificial Intelligence
 const AI_TAG = /\bAI\b|\bChatGPT\b|\bLLMs?\b/;
 const AI_PHRASE = /artificial intelligence/i;
 
+// The top-level industries that earn no topic, on purpose. With the ones the
+// rules above read, that is all 22 in Statista's taxonomy, as the listing
+// page's own industry menu gave them on 2026-11-18.
+const NO_TOPIC_BRANCHES = ['421', '410', '941', '460', '406']; // Agriculture; Chemicals & Resources; Construction; Real Estate; Services
+const KNOWN_BRANCHES = new Set([...BRANCH_TOPICS.keys(), ECONOMY_POLITICS, AI_BRANCH, ...NO_TOPIC_BRANCHES]);
+
+// True for an industry path that names no industry this file has heard of.
+// Every path read so far holds exactly one top-level id (200 of 200 charts on
+// 2026-11-18), so a path with none means Statista added an industry or
+// renumbered one, and the charts filed under it are silently leaving their
+// topic. The health check pages on the first such chart (see fetchChart). An
+// EMPTY path is not one of these: that is a chart Statista filed nowhere.
+export function unmapped(cls) {
+  const b = Array.isArray(cls?.b) ? cls.b.map(String) : [];
+  return b.length > 0 && !b.some((id) => KNOWN_BRANCHES.has(id));
+}
+
 // The topic slugs a classification earns, in CHART_TOPICS order. Derived on
 // every serve rather than stored, so a rule change needs no re-fetch.
 export function topicsOf(cls) {
@@ -654,6 +671,10 @@ export async function fetchChart(topic = '', { origin, budgetMs = REQUEST_BUDGET
   // legacy singular field keeps working when this worker deploys ahead of the
   // new widget (e.g. prod worker updated, prod chart widget not yet).
   const out = { chart: charts[0], charts, topic: t, fallback };
+  // For the health check, not for boards: the served charts whose industry
+  // path no rule recognises, with the ids, so the alert can say which.
+  const strangers = picked.filter((c) => unmapped(c.cls)).map((c) => ({ id: c.id, industries: c.cls.b.map(String) }));
+  if (strangers.length) out.unmapped = strangers;
   // Provisional answers. partial: true makes cached() keep an answer for at
   // most 120s and never write it over the route's 24h backup, which is right
   // for two kinds of answer here:

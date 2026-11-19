@@ -10,6 +10,12 @@
 // Cloudflare 522). Checks with `url` are external and use plain fetch. A check
 // with `canary` runs code instead of probing an endpoint, for the dependency
 // that has no route to watch (the CODES KV setup-code service; see codeCanary).
+// A validator (`ok`) returns true to pass. Anything else fails, and a string is
+// the reason, which becomes the alert's detail in place of the generic one.
+// `image` (optional): the URL of an image the payload hands a board. It is
+// fetched the way a board's <img> would and must answer as an image (see
+// imageFault): the payload can be perfect while the picture it points at is
+// gone.
 // `maxStaleSec` (own-route checks only): the maximum age the payload's updatedAt
 // may reach before the check FAILS, enforced regardless of the `stale` flag. It
 // catches two silent degradations: the worker serving last-good cache
@@ -39,6 +45,19 @@ const APOD_IMAGE_PATH = /\.(?:jpe?g|png|gif|webp)$/i;
 // weekend. Two weeks covers a holiday gap and still catches a listing that
 // froze.
 const CHART_DATE_MAX_MS = 14 * 86400 * 1000;
+
+// What a board's <img> sends for a hotlinked picture: a browser's agent and
+// the app as referrer (browsers send the origin alone across sites). A host
+// that starts refusing hotlinks does it by referrer, and a bare fetch, which
+// sends none, would keep passing while every board showed a broken image.
+// Self-hosters: put your own site's origin here.
+const BOARD_ORIGIN = 'https://idlescreen.app/';
+const IMAGE_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+  Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+  Referer: BOARD_ORIGIN,
+};
+const IMAGE_TIMEOUT_MS = 8000;
 
 export const CHECKS = [
   {
@@ -219,8 +238,9 @@ export const CHECKS = [
     // url is an https image on NASA's resizer host, assets.science.nasa.gov (a
     // move off that host is the next site move, worth a page). The image itself
     // is NOT fetched: that would be one more subrequest in a cron whose cold
-    // run already spends at or past the Free plan's 50, and no other check
-    // fetches assets either.
+    // run already spends at or past the Free plan's 50. The feed hands over
+    // this URL itself, so a move shows up in the host test above; the chart
+    // check does fetch its image, because that URL is built here.
     //
     // Two clocks, because a feed can die two ways. maxStaleSec catches the loud
     // way (the feed erroring while cached() serves last-good): a healthy answer
@@ -257,8 +277,9 @@ export const CHECKS = [
     // Only the general list is probed (no ?topic=): it is the one answer every
     // topic falls back to, and a topic probe would page for a quiet topic. The
     // content asserted is what the card needs: a numbered, titled chart whose
-    // image is https on Statista's CDN, cdn.statcdn.com. The image itself is
-    // not fetched, for the reason the apod check gives.
+    // image is https on Statista's CDN, cdn.statcdn.com, and that image is
+    // fetched (see `image` below): the worker builds its URL from the chart's
+    // id, so nothing in the listing would ever say the CDN path had moved.
     //
     // Two clocks, as for apod. maxStaleSec catches the loud way (the listing
     // erroring while cached() serves last-good): a healthy answer is up to
@@ -275,8 +296,9 @@ export const CHECKS = [
     // (the ten newest) must have earned a topic. Counted in charts, not days,
     // so a weekend or a holiday cannot trip it, and counted in topics, not
     // classifications, so a page that still answers but no longer says
-    // anything useful is caught too. Around a fifth of charts sit in no topic
-    // by nature (elections, say); ten in a row would be a first. Artificial
+    // anything useful is caught too. Around a tenth of charts sit in no topic
+    // by nature (elections, say); ten in a row would be a first (the longest
+    // run among 190 live charts on 2026-11-18 was three). Artificial
     // intelligence alone does not count: it is the one topic a chart can earn
     // from its tags, so it would survive a renumbering of the industries that
     // silenced the other fifteen. The one answer excused is a partial one: on
@@ -284,23 +306,46 @@ export const CHECKS = [
     // the chart pages and answered without reading any itself, from the
     // listing or from the index as it stood (see loadIndex in chart.js); it
     // lives two minutes.
+    //
+    // The topic clock only sees the whole taxonomy going. One industry added
+    // or renumbered takes one topic's charts and leaves the other fifteen
+    // looking fine, so the route names every served chart whose industry path
+    // it does not recognise (`unmapped`), and one is enough to fail: none of
+    // 200 live charts had such a path when this was written, and the alert
+    // carries the ids, which is everything needed to map them.
+    //
+    // Each failure says what it found. This card has broken twice by Statista
+    // changing something, and "unexpected shape/content" would send whoever is
+    // paged back to the payload to learn which thing it was this time.
     name: 'chart',
     path: '/chart',
     maxStaleSec: CHART_TTL_S + STALE_MAX,
     ok: (j) => {
       const c = Array.isArray(j.charts) ? j.charts[0] : null;
-      if (!c || typeof c.id !== 'string' || !/^\d+$/.test(c.id)) return false;
-      if (typeof c.title !== 'string' || !c.title) return false;
+      if (!c || typeof c.id !== 'string' || !/^\d+$/.test(c.id)) return 'no chart in the answer';
+      if (typeof c.title !== 'string' || !c.title) return 'newest chart has no title';
       let u;
-      try { u = new URL(c.url); } catch { return false; }
-      if (u.protocol !== 'https:' || u.hostname !== 'cdn.statcdn.com') return false;
+      try { u = new URL(c.url); } catch { return 'newest chart has no image url'; }
+      if (u.protocol !== 'https:' || u.hostname !== 'cdn.statcdn.com') return 'image is not https on cdn.statcdn.com';
       // A day of slack covers clock skew; further ahead is a mangled date that
       // would sort first in the index for good, as wrong as an old one.
       const age = Date.now() - Date.parse(c.date);
-      if (!Number.isFinite(age) || age <= -86400 * 1000 || age >= CHART_DATE_MAX_MS) return false;
-      return j.partial === true
-        || j.charts.some((x) => Array.isArray(x?.topics) && x.topics.some((t) => t !== 'artificial intelligence'));
+      if (!Number.isFinite(age) || age <= -86400 * 1000 || age >= CHART_DATE_MAX_MS) {
+        return `newest chart is dated ${String(c.date).slice(0, 10) || 'nothing'}`;
+      }
+      // Every chart Statista lists carries its article (the shortest of 190 ran
+      // to 196 characters), so ten charts without one is the field renamed,
+      // which would leave the full-screen view with a picture and no words.
+      if (!j.charts.some((x) => typeof x?.desc === 'string' && x.desc)) return 'no chart has a description';
+      if (Array.isArray(j.unmapped) && j.unmapped.length) {
+        const ids = [...new Set(j.unmapped.flatMap((x) => (Array.isArray(x?.industries) ? x.industries : [])).map(String))];
+        return `unmapped industry ${ids.slice(0, 6).join(' ')} on chart ${String(j.unmapped[0]?.id)}`.slice(0, 80);
+      }
+      if (j.partial === true) return true;
+      return j.charts.some((x) => Array.isArray(x?.topics) && x.topics.some((t) => t !== 'artificial intelligence'))
+        || 'no topic on any chart served';
     },
+    image: (j) => j.charts[0].url,
   },
   {
     // The setup-code service is the one dependency with no route worth probing:
@@ -401,6 +446,23 @@ function withTimeout(p, ms) {
   return Promise.race([p, timer]).finally(() => clearTimeout(t));
 }
 
+// null when the URL answers as an image, the reason when it does not. Only the
+// status and the type are read: the body is dropped unread, so the check costs
+// one request and no megabyte. A 200 that is not an image is the case a status
+// alone would miss (a CDN's "not found" page, a consent wall).
+async function imageFault(url, extFetch) {
+  try {
+    const res = await extFetch(url, { headers: IMAGE_HEADERS, signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) });
+    const type = String(res.headers?.get('content-type') ?? '').split(';')[0].trim();
+    await res.body?.cancel().catch(() => {});
+    if (!res.ok) return `image HTTP ${res.status}`;
+    if (!/^image\//i.test(type)) return `image answered as ${type || 'no content type'}`.slice(0, 80);
+    return null;
+  } catch (err) {
+    return err?.name === 'TimeoutError' ? 'image timeout' : `image ${String(err?.message ?? err)}`.slice(0, 80);
+  }
+}
+
 async function probe(check, selfFetch, extFetch, ctx = {}) {
   try {
     // A canary reports {ok, detail} from its own logic rather than from a
@@ -430,7 +492,10 @@ async function probe(check, selfFetch, extFetch, ctx = {}) {
     const body = await res.text();
     let json;
     try { json = JSON.parse(body); } catch { return { name: check.name, ok: false, detail: 'unparseable response' }; }
-    if (!check.ok(json)) return { name: check.name, ok: false, detail: 'unexpected shape/content' };
+    const verdict = check.ok(json);
+    if (typeof verdict === 'string' || !verdict) {
+      return { name: check.name, ok: false, detail: verdict || 'unexpected shape/content' };
+    }
     const age = ageSeconds(json.updatedAt);
     // A body from one of OUR routes without a readable updatedAt is a broken
     // route, not a shrug. The old code let it pass: age came back null, the
@@ -451,6 +516,13 @@ async function probe(check, selfFetch, extFetch, ctx = {}) {
     if (check.maxStaleSec && age !== null && age > check.maxStaleSec) {
       const mins = Math.round(age / 60);
       return { name: check.name, ok: false, detail: `stale ${mins} min old`, stale: json.stale === true, ageSec: age };
+    }
+    // The payload is sound; now the picture it points at. After the age test on
+    // purpose: an answer already past its window fails on that, the image in a
+    // payload that old is not worth a request.
+    if (check.image) {
+      const fault = await imageFault(check.image(json), extFetch);
+      if (fault) return { name: check.name, ok: false, detail: fault };
     }
     // stale=true within the age budget is a tolerable blip: the worker served
     // last-good cache because the upstream refresh failed, but the data is recent

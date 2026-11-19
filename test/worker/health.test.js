@@ -78,12 +78,27 @@ function mockFetch(overrides = {}) {
     if (o?.throw) return Promise.reject(Object.assign(new Error('boom'), { name: o.throw }));
     const status = o?.status ?? 200;
     const body = o && 'body' in o ? o.body : JSON.stringify(bodyFor(url));
-    return Promise.resolve({ ok: status >= 200 && status < 300, status, text: () => Promise.resolve(body) });
+    // The one non-JSON answer a probe reads: the chart's image, by its type.
+    const type = o?.type ?? (url.includes('cdn.statcdn.com') ? 'image/jpeg' : 'application/json');
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (h) => (h.toLowerCase() === 'content-type' ? type : null) },
+      text: () => Promise.resolve(body),
+    });
   });
 }
 
 describe('health CHECKS validators', () => {
   const byName = Object.fromEntries(CHECKS.map((c) => [c.name, c.ok]));
+
+  it('every validator answers its healthy payload with true itself, since a string now means a reason', () => {
+    for (const c of CHECKS.filter((x) => x.ok)) {
+      const sample = bodyFor(c.path ?? c.url);
+      expect(sample, c.name).toBeDefined();
+      expect(c.ok(sample), c.name).toBe(true);
+    }
+  });
 
   it('site: needs a version string', () => {
     expect(byName.site({ version: '2026.07.22-abc' })).toBe(true);
@@ -210,29 +225,40 @@ describe('health CHECKS validators', () => {
     const first = (over) => ({ charts: [{ ...live.charts[0], ...over }] });
     const daysAgo = (n) => new Date(Date.now() - n * 86400 * 1000).toISOString().slice(0, 10);
     expect(byName.chart(live)).toBe(true);
-    expect(byName.chart({ charts: [] })).toBe(false); // nothing to show
-    expect(byName.chart({ chart: live.charts[0] })).toBe(false); // the legacy field alone is not the contract
-    expect(byName.chart({})).toBe(false);
-    expect(byName.chart(first({ id: 35531 }))).toBe(false); // a number, not the string id
-    expect(byName.chart(first({ id: 'infographic-35531' }))).toBe(false);
-    expect(byName.chart(first({ title: '' }))).toBe(false);
-    // Plain http, another host, garbage.
-    expect(byName.chart(first({ url: live.charts[0].url.replace('https:', 'http:') }))).toBe(false);
-    expect(byName.chart(first({ url: 'https://www.statista.com/graphic/1/35531/x.jpg' }))).toBe(false);
-    expect(byName.chart(first({ url: 'not a url' }))).toBe(false);
+    expect(byName.chart({ charts: [] })).toBe('no chart in the answer'); // nothing to show
+    expect(byName.chart({ chart: live.charts[0] })).toBe('no chart in the answer'); // the legacy field alone is not the contract
+    expect(byName.chart({})).toBe('no chart in the answer');
+    expect(byName.chart(first({ id: 35531 }))).toBe('no chart in the answer'); // a number, not the string id
+    expect(byName.chart(first({ id: 'infographic-35531' }))).toBe('no chart in the answer');
+    expect(byName.chart(first({ title: '' }))).toBe('newest chart has no title');
+    // The image host: a move off Statista's CDN is the next redesign.
+    expect(byName.chart(first({ url: live.charts[0].url.replace('https:', 'http:') }))).toBe('image is not https on cdn.statcdn.com');
+    expect(byName.chart(first({ url: 'https://www.statista.com/graphic/1/35531/x.jpg' }))).toBe('image is not https on cdn.statcdn.com');
+    expect(byName.chart(first({ url: 'not a url' }))).toBe('newest chart has no image url');
     // The chart's own clock: a long weekend passes, a frozen listing does not.
     expect(byName.chart(first({ date: daysAgo(4) }))).toBe(true);
     expect(byName.chart(first({ date: daysAgo(13) }))).toBe(true);
-    expect(byName.chart(first({ date: daysAgo(15) }))).toBe(false);
-    expect(byName.chart(first({ date: daysAgo(-2) }))).toBe(false); // future: a mangled date
-    expect(byName.chart(first({ date: '' }))).toBe(false);
+    expect(byName.chart(first({ date: daysAgo(15) }))).toBe(`newest chart is dated ${daysAgo(15)}`);
+    expect(byName.chart(first({ date: daysAgo(-2) }))).toBe(`newest chart is dated ${daysAgo(-2)}`); // future: a mangled date
+    expect(byName.chart(first({ date: '' }))).toBe('newest chart is dated nothing');
     // The topic clock: of the charts served, at least one has earned a topic.
     const bare = { ...live.charts[0], topics: [] };
-    expect(byName.chart({ charts: [bare] })).toBe(false); // chart pages refused, or saying nothing
-    expect(byName.chart({ charts: [{ ...bare, topics: undefined }] })).toBe(false); // an answer from before the field
+    expect(byName.chart({ charts: [bare] })).toBe('no topic on any chart served'); // chart pages refused, or saying nothing
+    expect(byName.chart({ charts: [{ ...bare, topics: undefined }] })).toBe('no topic on any chart served'); // an answer from before the field
+    expect(byName.chart({ charts: [{ ...bare, topics: ['artificial intelligence'] }] })).toBe('no topic on any chart served'); // tags alone
     expect(byName.chart({ charts: [bare, bare, live.charts[0]] })).toBe(true); // any one of them will do
     expect(byName.chart({ charts: [bare], partial: true })).toBe(true); // a provisional answer is excused
-    expect(byName.chart({ charts: [{ ...bare, date: daysAgo(15) }], partial: true })).toBe(false); // but not from the other clocks
+    expect(byName.chart({ charts: [{ ...bare, date: daysAgo(15) }], partial: true })).toBe(`newest chart is dated ${daysAgo(15)}`); // but not from the other clocks
+    // The article: every listed chart has one, so none on any is the field gone.
+    expect(byName.chart({ charts: [{ ...live.charts[0], desc: '' }] })).toBe('no chart has a description');
+    expect(byName.chart({ charts: [{ ...live.charts[0], desc: '' }, live.charts[0]] })).toBe(true);
+    // An industry the topic rules have never heard of: one chart is enough, and
+    // the reason carries the ids. A provisional answer is no excuse, the chart
+    // was read.
+    const strange = { ...live, unmapped: [{ id: '36801', industries: ['9001', '9002'] }, { id: '36802', industries: ['9001'] }] };
+    expect(byName.chart(strange)).toBe('unmapped industry 9001 9002 on chart 36801');
+    expect(byName.chart({ ...strange, partial: true })).toBe('unmapped industry 9001 9002 on chart 36801');
+    expect(byName.chart({ ...live, unmapped: [] })).toBe(true);
   });
 });
 
@@ -599,7 +625,7 @@ describe('chart (the Statista card nothing watched through the 2026-11 redesign)
 
   it('FAILS on an empty list, even from a 200 with a fresh stamp', async () => {
     const report = await run({ '/chart': { body: body({ chart: null, charts: [] }) } });
-    expect(chart(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    expect(chart(report)).toMatchObject({ ok: false, detail: 'no chart in the answer' });
   });
 
   it('FAILS on last-good served past its 2h window, tolerates it inside', async () => {
@@ -614,14 +640,68 @@ describe('chart (the Statista card nothing watched through the 2026-11 redesign)
   it('FAILS on a frozen listing: fresh stamp, stale:false, but the newest chart three weeks old', async () => {
     const old = new Date(Date.now() - 21 * 86400 * 1000).toISOString().slice(0, 10);
     const report = await run({ '/chart': { body: body({ charts: [{ ...OK_BODIES['/chart'].charts[0], date: old }] }) } });
-    expect(chart(report)).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    expect(chart(report)).toMatchObject({ ok: false, detail: `newest chart is dated ${old}` });
   });
 
   it('FAILS when the chart pages stop answering: a current general list, but no chart in any topic', async () => {
     const untopiced = [{ ...OK_BODIES['/chart'].charts[0], topics: [] }];
-    expect(chart(await run({ '/chart': { body: body({ charts: untopiced }) } }))).toMatchObject({ ok: false, detail: 'unexpected shape/content' });
+    expect(chart(await run({ '/chart': { body: body({ charts: untopiced }) } }))).toMatchObject({ ok: false, detail: 'no topic on any chart served' });
     // The two-minute answer of a request that deferred to another's refresh is not that failure.
     expect(chart(await run({ '/chart': { body: body({ charts: untopiced, partial: true }) } }))).toMatchObject({ ok: true });
+  });
+
+  it('FAILS on one chart filed under an industry the topic rules do not know, naming it', async () => {
+    const unmapped = [{ id: '36801', industries: ['9001'] }];
+    expect(chart(await run({ '/chart': { body: body({ unmapped }) } }))).toMatchObject({ ok: false, detail: 'unmapped industry 9001 on chart 36801' });
+  });
+
+  describe('the image itself', () => {
+    const IMAGE = OK_BODIES['/chart'].charts[0].url;
+    const imageCalls = (m) => m.mock.calls.filter(([url]) => url === IMAGE);
+
+    it('is fetched once, as a board would: a browser agent, the app as referrer', async () => {
+      const m = mockFetch();
+      await runHealthChecks(okEnv(), m, m);
+      const calls = imageCalls(m);
+      expect(calls).toHaveLength(1);
+      const headers = new Headers(calls[0][1].headers);
+      expect(headers.get('referer')).toBe('https://idlescreen.app/');
+      expect(headers.get('user-agent')).toMatch(/^Mozilla\/5\.0 /);
+      expect(calls[0][1].signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('FAILS when the CDN refuses it or has moved it, with a perfect payload', async () => {
+      expect(chart(await run({ 'cdn.statcdn.com': { status: 403 } }))).toMatchObject({ ok: false, detail: 'image HTTP 403' });
+      expect(chart(await run({ 'cdn.statcdn.com': { status: 404 } }))).toMatchObject({ ok: false, detail: 'image HTTP 404' });
+    });
+
+    it('FAILS on a 200 that is not an image (a "not found" page, a consent wall)', async () => {
+      expect(chart(await run({ 'cdn.statcdn.com': { type: 'text/html; charset=utf-8' } }))).toMatchObject({ ok: false, detail: 'image answered as text/html' });
+      expect(chart(await run({ 'cdn.statcdn.com': { type: '' } }))).toMatchObject({ ok: false, detail: 'image answered as no content type' });
+    });
+
+    it('FAILS on a timeout or a dead connection, named as the image\'s', async () => {
+      expect(chart(await run({ 'cdn.statcdn.com': { throw: 'TimeoutError' } }))).toMatchObject({ ok: false, detail: 'image timeout' });
+      expect(chart(await run({ 'cdn.statcdn.com': { throw: 'TypeError' } }))).toMatchObject({ ok: false, detail: 'image boom' });
+    });
+
+    it('is not asked for when the payload already failed, or is past its window', async () => {
+      const bad = mockFetch({ '/chart': { body: body({ chart: null, charts: [] }) } });
+      await runHealthChecks(okEnv(), bad, bad);
+      expect(imageCalls(bad)).toHaveLength(0);
+      const old = mockFetch({ '/chart': { body: body({ stale: true, updatedAt: nowSec() - 3 * 3600 }) } });
+      await runHealthChecks(okEnv(), old, old);
+      expect(imageCalls(old)).toHaveLength(0);
+    });
+
+    it('still reports a tolerable stale blip as one, once the image answers', async () => {
+      const brief = await run({ '/chart': { body: body({ stale: true, updatedAt: nowSec() - 90 * 60 }) } });
+      expect(chart(brief)).toMatchObject({ ok: true, detail: 'ok (stale 90 min)', stale: true });
+    });
+
+    it('is the only asset any check fetches', () => {
+      expect(CHECKS.filter((c) => c.image).map((c) => c.name)).toEqual(['chart']);
+    });
   });
 });
 

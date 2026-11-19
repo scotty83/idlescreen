@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import worker from '../../worker/src/index.js';
 import {
-  CHART_TOPICS, resolveTopic, parseListing, parseChartPage, topicsOf, fetchChart,
+  CHART_TOPICS, resolveTopic, parseListing, parseChartPage, topicsOf, unmapped, fetchChart,
 } from '../../worker/src/chart.js';
 import { CHECKS } from '../../worker/src/health.js';
 import { CHART_TOPICS as SITE_TOPICS, CHART_TOPIC_ALIASES, CHART_TOPICS_DROPPED } from '../../site/js/widgets/chart-topics.js';
@@ -288,6 +288,20 @@ describe('topicsOf', () => {
     expect(t([418])).toEqual(['technology']);
     expect(t([419])).toEqual(['transportation']);
     expect(t([420])).toEqual(['travel']);
+  });
+
+  it('unmapped: a path naming no industry this file knows, and only that', () => {
+    const u = (b) => unmapped({ b: b.map(String), tags: [] });
+    expect(u([9001])).toBe(true);
+    expect(u([9001, 9002, 9003])).toBe(true);
+    expect(u([733, 418])).toBe(false); // an unknown leaf under a known industry
+    expect(u([2570, 484, 418])).toBe(false);
+    for (const id of [479, 421, 410, 941, 415, 413, 2535, 408, 414, 412, 424, 416, 417, 407, 460, 423, 406, 411, 409, 418, 419, 420]) {
+      expect(u([id]), String(id)).toBe(false); // Statista's 22 industries, 2026-11-18
+    }
+    expect(u([])).toBe(false); // filed nowhere: an answer, not a stranger
+    expect(unmapped(null)).toBe(false); // not read yet
+    expect(unmapped({ b: [9001], tags: [] })).toBe(true); // numbers, as an old index might hold
   });
 
   it('folds the neighbouring industries into the closest topic', () => {
@@ -930,7 +944,7 @@ describe('GET /chart', () => {
 
     it('fails when chart pages are refused', async () => {
       live(() => html('refused', 403));
-      expect(chartCheck.ok(await (await call('/chart')).json())).toBe(false);
+      expect(chartCheck.ok(await (await call('/chart')).json())).toBe('no topic on any chart served');
     });
 
     it('fails when chart pages answer but say nothing: an empty industry list on every one', async () => {
@@ -940,19 +954,42 @@ describe('GET /chart', () => {
       const body = await (await call('/chart')).json();
       expect(up.chartPages()).toBe(10);
       expect(body.partial).toBeUndefined();
-      expect(chartCheck.ok(body)).toBe(false);
+      expect(body.unmapped).toBeUndefined(); // filed nowhere is not filed somewhere unknown
+      expect(chartCheck.ok(body)).toBe('no topic on any chart served');
     });
 
-    it('fails when the industry ids no longer mean anything to the topic rules', async () => {
+    it('fails when the industry ids no longer mean anything to the topic rules, and says which', async () => {
       live(() => html(head([9001, 9002])));
-      expect(chartCheck.ok(await (await call('/chart')).json())).toBe(false);
+      const body = await (await call('/chart')).json();
+      expect(body.unmapped).toHaveLength(10);
+      expect(body.unmapped[0]).toEqual({ id: body.charts[0].id, industries: ['9001', '9002'] });
+      expect(chartCheck.ok(body)).toBe(`unmapped industry 9001 9002 on chart ${body.charts[0].id}`);
+    });
+
+    it('fails on ONE chart under an unknown industry while the other nine keep their topics', async () => {
+      // An industry added or renumbered: the topic clock sees nothing wrong.
+      live((id) => html(head(id === '70005' ? [9001, 418001] : [409])));
+      const body = await (await call('/chart')).json();
+      expect(body.charts.filter((c) => c.topics.length)).toHaveLength(9);
+      expect(body.unmapped).toEqual([{ id: '70005', industries: ['9001', '418001'] }]);
+      expect(chartCheck.ok(body)).toBe('unmapped industry 9001 418001 on chart 70005');
+    });
+
+    it('passes charts under the industries that earn no topic on purpose', async () => {
+      // Agriculture, Chemicals & Resources, Construction, Real Estate, Services.
+      const quiet = { 70001: 421, 70002: 410, 70003: 941, 70004: 460, 70005: 406 };
+      live((id) => html(head([733, quiet[id] ?? 409])));
+      const body = await (await call('/chart')).json();
+      expect(body.charts.filter((c) => c.topics.length === 0).map((c) => c.id).sort()).toEqual(Object.keys(quiet));
+      expect(body.unmapped).toBeUndefined();
+      expect(chartCheck.ok(body)).toBe(true);
     });
 
     it('fails when only tags still earn a topic: AI alone is not evidence the industries work', async () => {
       live(() => html(head([9001, 9002], ['Generative AI'])));
       const body = await (await call('/chart')).json();
       expect(body.charts[0].topics).toEqual(['artificial intelligence']);
-      expect(chartCheck.ok(body)).toBe(false);
+      expect(chartCheck.ok(body)).not.toBe(true);
     });
   });
 
